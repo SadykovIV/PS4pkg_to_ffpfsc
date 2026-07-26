@@ -1,4 +1,4 @@
-# PS4 FFPFSC 0.2.1 — Windows x64
+# PS4 FFPFSC 0.2.2 — Windows x64
 
 ## Русская версия
 
@@ -6,6 +6,12 @@
 MkPFS, библиотеки сжатия/криптографии и модуль чтения и извлечения PS4 PKG уже
 находятся внутри архива. Установка Python, Visual C++ Redistributable, Git,
 Homebrew или других приложений не требуется.
+
+### Исправления 0.2.2
+
+- Распакованные PKG, рабочее дерево и MkPFS tmp теперь записываются в выбранную
+  временную папку, а не в `Application Support`.
+- Пути и имена с кириллицей корректно обрабатываются worker и MkPFS в Windows.
 
 ### Использование
 
@@ -37,6 +43,12 @@ Self-contained build for 64-bit Windows 10/11. Python, Qt for Python, MkPFS,
 compression/cryptography libraries and the PS4 PKG inspection/extraction helper
 are included. Python, the Visual C++ Redistributable, Git, Homebrew and other
 applications are not required.
+
+## Fixes in 0.2.2
+
+- Extracted PKGs, merge trees and MkPFS scratch data now use the selected
+  temporary directory instead of `Application Support`.
+- The worker and MkPFS now handle Cyrillic paths and names correctly on Windows.
 
 ## Usage
 

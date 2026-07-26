@@ -1,4 +1,4 @@
-# PS4 FFPFSC 0.2.1 — macOS arm64
+# PS4 FFPFSC 0.2.2 — macOS arm64
 
 ## Русская версия
 
@@ -6,6 +6,12 @@
 MkPFS, библиотеки сжатия/криптографии и модуль чтения метаданных и извлечения
 PS4 PKG уже находятся внутри приложения. На целевом Mac не нужны Homebrew,
 Python, исходный репозиторий или внешние приложения.
+
+### Исправления 0.2.2
+
+- Распакованные PKG, рабочее дерево и MkPFS tmp теперь записываются в выбранную
+  временную папку (`/tmp` по умолчанию), а не в
+  `~/Library/Application Support/PS4 FFPFSC`.
 
 ### Исправления 0.2.1
 
@@ -49,6 +55,12 @@ Self-contained Apple Silicon application. Python, Qt for Python, MkPFS,
 compression/cryptography runtimes and the PS4 PKG metadata/extraction helper are
 inside the application bundle. Homebrew, Python and the source repository are
 not required on the destination Mac.
+
+## Fixes in 0.2.2
+
+- Extracted PKGs, merge trees and MkPFS scratch data now use the selected
+  temporary directory (`/tmp` by default), not
+  `~/Library/Application Support/PS4 FFPFSC`.
 
 ## Fixes in 0.2.1
 

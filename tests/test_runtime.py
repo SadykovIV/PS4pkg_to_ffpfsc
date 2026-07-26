@@ -30,3 +30,31 @@ def test_frozen_windows_uses_sibling_worker(
     monkeypatch.setattr(runtime.sys, "executable", str(gui))
 
     assert runtime.worker_executable() == tmp_path / "ps4ffpsc-worker.exe"
+
+
+def test_temporary_workspace_is_namespaced_and_not_application_data(
+    tmp_path: Path,
+) -> None:
+    selected_temp = tmp_path / "tmp"
+
+    assert runtime.temporary_workspace(selected_temp) == (
+        selected_temp / runtime.APP_SUPPORT_NAME
+    ).resolve()
+
+
+def test_macos_default_temporary_directory_is_tmp(monkeypatch) -> None:
+    monkeypatch.setattr(runtime.sys, "platform", "darwin")
+
+    assert runtime.default_temporary_directory() == Path("/tmp")
+
+
+def test_application_data_root_does_not_create_heavy_workspace(
+    tmp_path: Path,
+) -> None:
+    runtime.ensure_application_directories(tmp_path)
+
+    assert (tmp_path / "pkg").is_dir()
+    assert (tmp_path / "logs").is_dir()
+    assert (tmp_path / "output").is_dir()
+    assert not (tmp_path / "unpacked").exists()
+    assert not (tmp_path / "work").exists()

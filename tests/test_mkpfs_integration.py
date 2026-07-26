@@ -47,6 +47,7 @@ def test_mkpfs_nested_exfat_build_verify_and_deep_unpack(tmp_path: Path) -> None
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     assert process.returncode == 0, process.stdout + process.stderr
     result = _verify_image(settings, output, source, "current-smp")

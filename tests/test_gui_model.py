@@ -11,6 +11,7 @@ from ps4ffpsc.gui_model import (
     normalize_pkg_files,
     package_version_text,
     source_cli_arguments,
+    temporary_cli_arguments,
 )
 
 
@@ -38,6 +39,20 @@ def test_folder_mode_is_recursive_cli_source(tmp_path: Path) -> None:
     assert source_cli_arguments("folder", [], nested) == [
         "--pkg-dir",
         str(nested.resolve()),
+    ]
+
+
+def test_all_heavy_workspace_paths_use_selected_temp_directory(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "PS4 FFPFSC"
+    assert temporary_cli_arguments(tmp_path) == [
+        "--unpacked-dir",
+        str(workspace / "unpacked"),
+        "--work-dir",
+        str(workspace / "work"),
+        "--temp-dir",
+        str(workspace / "tmp"),
     ]
 
 

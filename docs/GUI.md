@@ -48,7 +48,7 @@ after three seconds. A later run can reuse verified extraction state when
 ## Launch and packaging
 
 Download and completely extract
-`PS4-FFPFSC-v0.2.1-windows-x64.zip`, then launch `PS4 FFPFSC.exe`. The
+`PS4-FFPFSC-v0.2.2-windows-x64.zip`, then launch `PS4 FFPFSC.exe`. The
 accompanying `_internal` directory and `ps4ffpsc-worker.exe` are required parts
 of the self-contained application.
 

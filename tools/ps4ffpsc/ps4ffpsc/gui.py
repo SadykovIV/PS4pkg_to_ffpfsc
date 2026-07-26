@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
 import sys
 from pathlib import Path
@@ -38,19 +39,22 @@ from .gui_model import (
     inventory_summary,
     package_version_text,
     source_cli_arguments,
+    temporary_cli_arguments,
     validate_source,
 )
 from .runtime import (
     application_data_root,
+    default_temporary_directory,
     ensure_application_directories,
     is_frozen,
     resource_root,
+    temporary_workspace,
     worker_executable,
 )
 
 
 APP_NAME = "PS4 FFPFSC"
-APP_VERSION = "0.2.1"
+APP_VERSION = "0.2.2"
 CREATE_NO_WINDOW = 0x08000000
 
 
@@ -349,7 +353,9 @@ class MainWindow(QMainWindow):
     def _restore_settings(self) -> None:
         output = self.settings.value("output_dir", str(self.root / "output"), type=str)
         self.output_dir = Path(output).expanduser()
-        temp = self.settings.value("temp_dir", tempfile.gettempdir(), type=str)
+        temp = self.settings.value(
+            "temp_dir", str(default_temporary_directory()), type=str
+        )
         self.temp_dir = Path(temp).expanduser()
         folder = self.settings.value("source_folder", "", type=str)
         if folder and Path(folder).is_dir():
@@ -428,7 +434,7 @@ class MainWindow(QMainWindow):
         start = str(
             self.temp_dir
             if self.temp_dir.is_dir()
-            else Path(tempfile.gettempdir())
+            else default_temporary_directory()
         )
         name = QFileDialog.getExistingDirectory(
             self,
@@ -443,7 +449,7 @@ class MainWindow(QMainWindow):
         self._save_settings()
 
     def _reset_temp(self) -> None:
-        self.temp_dir = Path(tempfile.gettempdir())
+        self.temp_dir = default_temporary_directory()
         self._update_storage_labels()
         self._save_settings()
 
@@ -453,7 +459,7 @@ class MainWindow(QMainWindow):
         detail = str(self.temp_dir)
         try:
             probe = self.temp_dir if self.temp_dir.exists() else self.temp_dir.parent
-            free = os.statvfs(probe).f_bavail * os.statvfs(probe).f_frsize
+            free = shutil.disk_usage(probe).free
             detail += f"  ·  свободно {free / 1024**3:.1f} GiB"
         except OSError:
             detail += "  ·  каталог будет создан при сборке"
@@ -494,8 +500,6 @@ class MainWindow(QMainWindow):
         arguments = [
             "--output-dir",
             str(self.output_dir.resolve()),
-            "--temp-dir",
-            str(self.temp_dir),
             "--compat",
             str(self.compat_combo.currentData()),
             "--include-dlc",
@@ -503,6 +507,7 @@ class MainWindow(QMainWindow):
             "--console-log",
             "--json",
         ]
+        arguments.extend(temporary_cli_arguments(self.temp_dir))
         arguments.extend(self._source_arguments())
         if self.resume_check.isChecked():
             arguments.append("--resume")
@@ -548,9 +553,10 @@ class MainWindow(QMainWindow):
             return
         try:
             self.output_dir.mkdir(parents=True, exist_ok=True)
-            self.temp_dir.mkdir(parents=True, exist_ok=True)
+            workspace = temporary_workspace(self.temp_dir)
+            workspace.mkdir(parents=True, exist_ok=True)
             with tempfile.NamedTemporaryFile(
-                dir=self.temp_dir,
+                dir=workspace,
                 prefix="ps4ffpsc-gui-write-test-",
                 delete=True,
             ):
@@ -603,6 +609,8 @@ class MainWindow(QMainWindow):
             process_arguments = [str(launcher), *arguments]
         environment = QProcessEnvironment.systemEnvironment()
         environment.insert("PYTHONUNBUFFERED", "1")
+        environment.insert("PYTHONUTF8", "1")
+        environment.insert("PYTHONIOENCODING", "utf-8")
         environment.insert("PS4FFPSC_DATA_ROOT", str(self.root))
         environment.insert("PS4FFPSC_RESOURCE_ROOT", str(self.resources))
         self.process.setProcessEnvironment(environment)

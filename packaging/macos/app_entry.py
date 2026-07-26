@@ -5,8 +5,15 @@ import os
 import sys
 
 
+def _configure_utf8_stdio() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+
+
 def main() -> int:
     multiprocessing.freeze_support()
+    _configure_utf8_stdio()
     if len(sys.argv) > 1 and sys.argv[1] == "--worker":
         from ps4ffpsc.cli import main as cli_main
 

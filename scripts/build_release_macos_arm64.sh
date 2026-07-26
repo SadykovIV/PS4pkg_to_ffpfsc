@@ -6,7 +6,7 @@ PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 BUILD_ROOT="${PROJECT_ROOT}/build-release"
 RELEASE_ROOT="${PROJECT_ROOT}/release"
 APP_PATH="${BUILD_ROOT}/dist/PS4 FFPFSC.app"
-VERSION="0.2.1"
+VERSION="0.2.2"
 
 if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
   echo "This release must be built natively on macOS arm64." >&2
@@ -47,9 +47,28 @@ codesign --verify --deep --strict --verbose=2 "${APP_PATH}"
 
 SMOKE_ROOT="$(mktemp -d /tmp/ps4ffpsc-release-smoke.XXXXXX)"
 trap 'rm -rf "${SMOKE_ROOT}"' EXIT
+mkdir -p "${SMOKE_ROOT}/input" "${SMOKE_ROOT}/selected-temp"
+TEMP_WORKSPACE="${SMOKE_ROOT}/selected-temp/PS4 FFPFSC"
 PS4FFPSC_DATA_ROOT="${SMOKE_ROOT}" \
-  "${APP_PATH}/Contents/MacOS/PS4 FFPFSC" --worker doctor --json \
+  "${APP_PATH}/Contents/MacOS/PS4 FFPFSC" --worker doctor \
+  --pkg-dir "${SMOKE_ROOT}/input" \
+  --unpacked-dir "${TEMP_WORKSPACE}/unpacked" \
+  --work-dir "${TEMP_WORKSPACE}/work" \
+  --temp-dir "${TEMP_WORKSPACE}/tmp" \
+  --output-dir "${SMOKE_ROOT}/output" \
+  --json \
   > "${BUILD_ROOT}/doctor.json"
+PS4FFPSC_DATA_ROOT="${SMOKE_ROOT}" \
+  "${APP_PATH}/Contents/MacOS/PS4 FFPFSC" --worker scan \
+  --pkg-dir "${SMOKE_ROOT}/input" \
+  --unpacked-dir "${TEMP_WORKSPACE}/unpacked" \
+  --work-dir "${TEMP_WORKSPACE}/work" \
+  --temp-dir "${TEMP_WORKSPACE}/tmp" \
+  --output-dir "${SMOKE_ROOT}/output" \
+  --json > "${BUILD_ROOT}/temp-routing.json"
+test -f "${TEMP_WORKSPACE}/unpacked/package_inventory.json"
+test ! -e "${SMOKE_ROOT}/unpacked"
+test ! -e "${SMOKE_ROOT}/work"
 PS4FFPSC_DATA_ROOT="${SMOKE_ROOT}" \
   "${APP_PATH}/Contents/MacOS/PS4 FFPFSC" --mkpfs -V \
   > "${BUILD_ROOT}/mkpfs-version.txt"

@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Iterable
 
+from .runtime import temporary_workspace
+
 
 def normalize_pkg_files(paths: Iterable[str | Path]) -> tuple[Path, ...]:
     """Return unique absolute PKG paths while preserving the user's order."""
@@ -55,6 +57,18 @@ def source_cli_arguments(
     for path in normalized_files:
         arguments.extend(["--pkg-file", str(path)])
     return arguments
+
+
+def temporary_cli_arguments(temp_dir: str | Path) -> list[str]:
+    workspace = temporary_workspace(Path(temp_dir))
+    return [
+        "--unpacked-dir",
+        str(workspace / "unpacked"),
+        "--work-dir",
+        str(workspace / "work"),
+        "--temp-dir",
+        str(workspace / "tmp"),
+    ]
 
 
 def inventory_summary(inventory: dict[str, Any]) -> dict[str, int]:

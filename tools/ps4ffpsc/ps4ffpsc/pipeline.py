@@ -577,28 +577,47 @@ def merge_game(
     return report
 
 
+def _utf8_subprocess_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    environment["PYTHONUTF8"] = "1"
+    environment["PYTHONIOENCODING"] = "utf-8"
+    return environment
+
+
 def mkpfs_command(settings: Settings) -> list[str]:
     if is_frozen():
         return [sys.executable, "--mkpfs"]
-    venv_python = settings.root / ".venv" / "bin" / "python"
-    candidates = [venv_python, Path(sys.executable)]
+    candidates = [
+        settings.root / ".venv" / "Scripts" / "python.exe",
+        settings.root / ".venv" / "bin" / "python",
+        Path(sys.executable),
+    ]
     for candidate in candidates:
         if not candidate.exists():
             continue
         process = subprocess.run(
-            [str(candidate), "-c", "import mkpfs; print(mkpfs.__file__)"],
+            [str(candidate), "-X", "utf8", "-c", "import mkpfs; print(mkpfs.__file__)"],
             check=False,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            env=_utf8_subprocess_environment(),
         )
         if process.returncode == 0:
-            return [str(candidate), "-m", "mkpfs"]
+            return [str(candidate), "-X", "utf8", "-m", "mkpfs"]
     raise RuntimeError("official MkPFS is not installed; run scripts/bootstrap_macos.sh")
 
 
 def _run_logged(command: list[str], log_path: Path) -> subprocess.CompletedProcess[str]:
     LOG.info("running: %s", " ".join(json.dumps(part) for part in command))
-    process = subprocess.run(command, check=False, capture_output=True, text=True, encoding="utf-8")
+    process = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=_utf8_subprocess_environment(),
+    )
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as stream:
         stream.write(f"$ {' '.join(json.dumps(part) for part in command)}\n")
@@ -975,7 +994,12 @@ def doctor(settings: Settings) -> dict[str, Any]:
     try:
         mkpfs = mkpfs_command(settings)
         process = subprocess.run(
-            [*mkpfs, "-V"], check=False, capture_output=True, text=True
+            [*mkpfs, "-V"],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            env=_utf8_subprocess_environment(),
         )
         checks["mkpfs"] = {
             "ok": process.returncode == 0,

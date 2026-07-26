@@ -9,7 +9,7 @@ $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $BuildRoot = Join-Path $ProjectRoot "build-release-windows"
 $ReleaseRoot = Join-Path $ProjectRoot "release"
 $AppPath = Join-Path $BuildRoot "dist\PS4 FFPFSC"
-$Version = "0.2.1"
+$Version = "0.2.2"
 
 if (-not $IsWindows) {
     throw "This release script must run on Windows."
@@ -50,6 +50,8 @@ ctest --test-dir (Join-Path $BuildRoot "helper") --output-on-failure
 if ($LASTEXITCODE -ne 0) { throw "C++ helper tests failed." }
 
 $env:QT_QPA_PLATFORM = "offscreen"
+$env:PYTHONUTF8 = "1"
+$env:PYTHONIOENCODING = "utf-8"
 python (Join-Path $ProjectRoot "packaging\windows\make_icon.py") `
     (Join-Path $BuildRoot "AppIcon.ico")
 if ($LASTEXITCODE -ne 0) { throw "Windows icon generation failed." }
@@ -74,9 +76,35 @@ $env:PS4FFPSC_DATA_ROOT = $SmokeRoot
 $Worker = Join-Path $AppPath "ps4ffpsc-worker.exe"
 $Gui = Join-Path $AppPath "PS4 FFPFSC.exe"
 
-& $Worker --worker doctor --json |
+$InputRoot = Join-Path $SmokeRoot "Входные PKG"
+$TempWorkspace = Join-Path $SmokeRoot "selected-temp\PS4 FFPFSC"
+New-Item $InputRoot -ItemType Directory -Force | Out-Null
+& $Worker --worker doctor `
+    --pkg-dir $InputRoot `
+    --unpacked-dir (Join-Path $TempWorkspace "unpacked") `
+    --work-dir (Join-Path $TempWorkspace "work") `
+    --temp-dir (Join-Path $TempWorkspace "tmp") `
+    --output-dir (Join-Path $SmokeRoot "output") `
+    --json |
     Set-Content (Join-Path $BuildRoot "doctor.json") -Encoding utf8NoBOM
 if ($LASTEXITCODE -ne 0) { throw "Frozen doctor smoke test failed." }
+
+& $Worker --worker scan `
+    --pkg-dir $InputRoot `
+    --unpacked-dir (Join-Path $TempWorkspace "unpacked") `
+    --work-dir (Join-Path $TempWorkspace "work") `
+    --temp-dir (Join-Path $TempWorkspace "tmp") `
+    --output-dir (Join-Path $SmokeRoot "output") `
+    --json |
+    Set-Content (Join-Path $BuildRoot "temp-routing.json") -Encoding utf8NoBOM
+if ($LASTEXITCODE -ne 0) { throw "Frozen temporary routing smoke test failed." }
+if (-not (Test-Path (Join-Path $TempWorkspace "unpacked\package_inventory.json"))) {
+    throw "Temporary inventory was not written below the selected temp directory."
+}
+if ((Test-Path (Join-Path $SmokeRoot "unpacked")) -or
+    (Test-Path (Join-Path $SmokeRoot "work"))) {
+    throw "Heavy temporary directories leaked into application data."
+}
 
 & $Worker --mkpfs -V |
     Set-Content (Join-Path $BuildRoot "mkpfs-version.txt") -Encoding utf8NoBOM

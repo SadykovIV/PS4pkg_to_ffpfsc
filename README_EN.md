@@ -12,11 +12,11 @@ Both release archives are self-contained and include Python, Qt, MkPFS and the
 native PKG helper:
 
 - **Windows x64:** extract
-  `PS4-FFPFSC-v0.2.1-windows-x64.zip` completely, then run
+  `PS4-FFPFSC-v0.2.2-windows-x64.zip` completely, then run
   `PS4 FFPFSC.exe`. Keep the accompanying files in the extracted directory.
   An unsigned build may require explicit approval in Microsoft Defender
   SmartScreen on first launch.
-- **macOS arm64:** extract `PS4-FFPFSC-v0.2.1-macos-arm64.zip`, move
+- **macOS arm64:** extract `PS4-FFPFSC-v0.2.2-macos-arm64.zip`, move
   `PS4 FFPFSC.app` to `/Applications`, then use
   **Control-click → Open** for the first launch of the current ad-hoc-signed
   build.
@@ -45,6 +45,10 @@ hashes an entire multi-gigabyte file; the full SHA-256 is computed only when a
 build starts, before extraction. A patch (`CATEGORY=gp`) and DLC cannot replace
 the required base package (`CATEGORY=gd`); the GUI keeps the readiness action
 available and displays this exact reason.
+
+Extracted PKGs, merge trees and MkPFS scratch files are stored under
+`PS4 FFPFSC` inside the temporary directory selected in the GUI (`%TEMP%` on
+Windows or `/tmp` on macOS by default), not under `Application Support`.
 
 `ps4ffpsc` converts legally owned, shadPS4-supported PS4 PKGs into verified
 ShadowMountPlus `.ffpfsc` artifacts:

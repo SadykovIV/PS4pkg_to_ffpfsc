@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -46,6 +47,19 @@ def worker_executable() -> Path:
     return executable
 
 
+def temporary_workspace(temp_dir: Path) -> Path:
+    base = temp_dir.expanduser().resolve()
+    if base.name == APP_SUPPORT_NAME:
+        return base
+    return base / APP_SUPPORT_NAME
+
+
+def default_temporary_directory() -> Path:
+    if sys.platform == "darwin":
+        return Path("/tmp")
+    return Path(tempfile.gettempdir())
+
+
 def ensure_application_directories(root: Path) -> None:
-    for name in ("pkg", "unpacked", "output", "work", "logs"):
+    for name in ("pkg", "output", "logs"):
         (root / name).mkdir(parents=True, exist_ok=True)
