@@ -209,24 +209,49 @@ def _save_state(root: Path, state: dict[str, Any]) -> None:
     atomic_write_json(root / ".ps4ffpsc-state.json", state)
 
 
+def _deduplicate_packages_by_sha(
+    packages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    unique: list[dict[str, Any]] = []
+    seen: dict[str, dict[str, Any]] = {}
+    for package in packages:
+        package_sha = package.get("sha256")
+        if not package_sha:
+            raise RuntimeError(f"package SHA-256 is missing: {package.get('path')}")
+        duplicate = seen.get(package_sha)
+        if duplicate is not None:
+            package["duplicate_of"] = duplicate["path"]
+            LOG.warning(
+                "ignoring byte-identical duplicate PKG: %s (same as %s)",
+                package["path"],
+                duplicate["path"],
+            )
+            continue
+        package.pop("duplicate_of", None)
+        seen[package_sha] = package
+        unique.append(package)
+    return unique
+
+
 def unpack_game(settings: Settings, inventory: dict[str, Any], title_id: str) -> dict[str, Any]:
     game = game_or_raise(inventory, title_id)
     if not game["buildable"]:
         raise RuntimeError(f"{title_id} is not buildable: {', '.join(game['conflicts'] or game['warnings'])}")
     root = game_root(settings, game)
     root.mkdir(parents=True, exist_ok=True)
-    selected = [
+    candidates = [
         item
         for item in [*game["base"], *game["patches"], *game["dlc"]]
         if item.get("supported") and not item.get("duplicate_of")
     ]
-    for package in selected:
+    for package in candidates:
         if package.get("sha256"):
             continue
         source = Path(package["path"])
         LOG.info("computing source SHA-256 before extraction: %s", source)
         package["sha256"] = sha256_file(source)
         package["sha256_verified"] = True
+    selected = _deduplicate_packages_by_sha(candidates)
     check_disk_space(settings.temp_dir, _disk_required(selected, 1.25))
     extractor = extractor_or_raise(settings)
     state = _load_state(root)
@@ -316,12 +341,47 @@ def unpack_game(settings: Settings, inventory: dict[str, Any], title_id: str) ->
     return manifest
 
 
+def _path_exists(path: Path) -> bool:
+    return path.exists() or path.is_symlink()
+
+
+def _align_existing_path_case(
+    destination: Path,
+    previous_relative: Path,
+    relative: Path,
+) -> None:
+    if len(previous_relative.parts) != len(relative.parts):
+        raise RuntimeError(
+            "case-insensitive path collision has incompatible components: "
+            f"{previous_relative.as_posix()!r} vs {relative.as_posix()!r}"
+        )
+    current = destination
+    for previous_part, new_part in zip(previous_relative.parts, relative.parts, strict=True):
+        previous_path = current / previous_part
+        new_path = current / new_part
+        ensure_within(destination, previous_path)
+        ensure_within(destination, new_path)
+        if previous_part != new_part and _path_exists(previous_path):
+            if _path_exists(new_path):
+                try:
+                    same_entry = os.path.samefile(previous_path, new_path)
+                except OSError:
+                    same_entry = False
+                if not same_entry:
+                    raise RuntimeError(
+                        "cannot apply case-only patch path because both spellings exist: "
+                        f"{previous_relative.as_posix()!r} vs {relative.as_posix()!r}"
+                    )
+            os.rename(previous_path, new_path)
+        current = new_path
+
+
 def _copy_overlay(
     source: Path,
     destination: Path,
     package: dict[str, Any],
     changes: list[dict[str, Any]],
-    case_map: dict[str, str],
+    case_map: dict[str, tuple[str, str]],
 ) -> None:
     for relative, source_file in sorted(iter_tree_files(source), key=lambda item: item[0].as_posix()):
         rel_text = relative.as_posix()
@@ -329,10 +389,23 @@ def _copy_overlay(
             LOG.warning("ignoring macOS host metadata in extracted tree: %s", source_file)
             continue
         folded = rel_text.casefold()
-        previous_case = case_map.get(folded)
-        if previous_case is not None and previous_case != rel_text:
-            raise RuntimeError(f"case-insensitive path collision: {previous_case!r} vs {rel_text!r}")
-        case_map[folded] = rel_text
+        package_identity = package.get("sha256") or package.get("path", "")
+        previous = case_map.get(folded)
+        case_renamed_from: str | None = None
+        if previous is not None and previous[1] != rel_text:
+            previous_package, previous_case = previous
+            if package.get("kind") != "patch" or previous_package == package_identity:
+                raise RuntimeError(
+                    f"case-insensitive path collision: {previous_case!r} vs {rel_text!r}"
+                )
+            _align_existing_path_case(destination, Path(previous_case), relative)
+            case_renamed_from = previous_case
+            LOG.info(
+                "applying patch case-only path replacement: %s -> %s",
+                previous_case,
+                rel_text,
+            )
+        case_map[folded] = (package_identity, rel_text)
         target = destination / relative
         ensure_within(destination, target)
         previous_hash = sha256_file(target) if target.exists() else None
@@ -341,16 +414,19 @@ def _copy_overlay(
         partial = target.with_name(f"{target.name}.partial")
         shutil.copy2(source_file, partial, follow_symlinks=False)
         os.replace(partial, target)
-        if previous_hash != new_hash and package.get("kind") != "base":
-            changes.append(
-                {
-                    "path": rel_text,
-                    "previous_sha256": previous_hash,
-                    "new_sha256": new_hash,
-                    "source_package": package["sha256"],
-                    "source_app_version": package.get("app_version"),
-                }
-            )
+        if package.get("kind") != "base" and (
+            previous_hash != new_hash or case_renamed_from is not None
+        ):
+            change = {
+                "path": rel_text,
+                "previous_sha256": previous_hash,
+                "new_sha256": new_hash,
+                "source_package": package["sha256"],
+                "source_app_version": package.get("app_version"),
+            }
+            if case_renamed_from is not None:
+                change["case_renamed_from"] = case_renamed_from
+            changes.append(change)
 
 
 def merge_game(
@@ -389,7 +465,7 @@ def merge_game(
         safe_remove_tree(addcont, root)
     partial.mkdir(parents=True)
     changes: list[dict[str, Any]] = []
-    case_map: dict[str, str] = {}
+    case_map: dict[str, tuple[str, str]] = {}
     _copy_overlay(package_destination(root, base[0]), partial, base[0], changes, case_map)
     for patch in patches:
         _copy_overlay(package_destination(root, patch), partial, patch, changes, case_map)
@@ -421,8 +497,16 @@ def merge_game(
 
     addcont_partial.mkdir(parents=True)
     dlc_reports: list[dict[str, Any]] = []
+    dlc_labels: dict[str, dict[str, Any]] = {}
     for item in dlc:
         label = item.get("entitlement_label") or f"UNKNOWN-{item['sha256'][:12]}"
+        previous_dlc = dlc_labels.get(label)
+        if previous_dlc is not None:
+            raise RuntimeError(
+                f"conflicting DLC entitlement label {label}: "
+                f"{previous_dlc['path']} vs {item['path']}"
+            )
+        dlc_labels[label] = item
         source = package_destination(root, item)
         target = addcont_partial / label
         target.mkdir(parents=True)
@@ -645,10 +729,15 @@ def _pack_dlc_separate(
     return artifacts
 
 
-def build_game(settings: Settings, title_id: str) -> dict[str, Any]:
+def build_game(
+    settings: Settings,
+    title_id: str,
+    inventory: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     configure_logging(settings, title_id)
     LOG.info("build started: %s", title_id)
-    inventory = load_or_scan(settings, refresh=True)
+    if inventory is None:
+        inventory = load_or_scan(settings, refresh=True)
     game = game_or_raise(inventory, title_id)
     if not game["buildable"]:
         raise RuntimeError(f"{title_id} skipped: {game['conflicts'] or game['warnings']}")

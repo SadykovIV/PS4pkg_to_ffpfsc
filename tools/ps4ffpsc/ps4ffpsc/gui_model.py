@@ -68,6 +68,16 @@ def inventory_summary(inventory: dict[str, Any]) -> dict[str, int]:
     }
 
 
+def build_error_text(payload: Any, title_id: str, exit_code: int) -> str:
+    if isinstance(payload, dict):
+        result = payload.get(title_id)
+        if isinstance(result, dict):
+            error = result.get("error") or result.get("reason")
+            if isinstance(error, str) and error.strip():
+                return error.strip()
+    return f"код {exit_code}; подробности находятся в журнале"
+
+
 def package_version_text(package: dict[str, Any]) -> str:
     if package.get("kind") == "dlc":
         return str(package.get("entitlement_label") or package.get("app_version") or "—")

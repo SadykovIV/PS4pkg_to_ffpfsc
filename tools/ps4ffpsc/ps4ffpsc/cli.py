@@ -222,7 +222,7 @@ def main(argv: list[str] | None = None) -> int:
                     results[title_id] = {"status": "skipped", "reason": game["conflicts"] or game["warnings"]}
                     continue
                 try:
-                    results[title_id] = build_game(settings, title_id)
+                    results[title_id] = build_game(settings, title_id, inventory)
                 except Exception as error:
                     failed = True
                     results[title_id] = {"error": str(error)}

@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 )
 
 from .gui_model import (
+    build_error_text,
     game_block_reason,
     inventory_summary,
     package_version_text,
@@ -48,7 +49,7 @@ from .runtime import (
 
 
 APP_NAME = "PS4 FFPFSC"
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.2.1"
 
 
 class MainWindow(QMainWindow):
@@ -648,11 +649,13 @@ class MainWindow(QMainWindow):
                 self.build_results[title_id] = payload or {"status": "completed"}
                 self._append_log(f"{title_id}: сборка и проверка успешно завершены.")
             else:
+                error_text = build_error_text(payload, title_id, exit_code)
                 self.build_results[title_id] = {
                     "status": "cancelled" if self.cancel_requested else "failed",
                     "exit_code": exit_code,
+                    "error": error_text,
                 }
-                self._append_log(f"{title_id}: ошибка, код {exit_code}.")
+                self._append_log(f"{title_id}: ошибка — {error_text}")
             self._start_next_build()
         self._update_controls()
 
@@ -787,9 +790,13 @@ class MainWindow(QMainWindow):
             self.stage_label.setText("Отменено")
         elif failed:
             self.stage_label.setText("Завершено с ошибками")
+            details = "\n".join(
+                f"{title_id}: {self.build_results[title_id].get('error', 'неизвестная ошибка')}"
+                for title_id in failed
+            )
             self._show_error(
                 "Не все образы собраны",
-                f"Успешно: {succeeded}. Ошибки: {', '.join(failed)}.",
+                f"Успешно: {succeeded}.\n\n{details}",
             )
         else:
             self.stage_label.setText("Все выбранные образы готовы")

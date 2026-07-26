@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from ps4ffpsc.gui_model import (
+    build_error_text,
     game_block_reason,
     inventory_summary,
     normalize_pkg_files,
@@ -74,3 +75,18 @@ def test_orphan_game_explains_missing_base_pkg() -> None:
     )
     assert "base PKG" in reason
     assert "patch" in reason
+
+
+def test_build_error_text_reads_worker_json_error() -> None:
+    payload = {
+        "CUSA12878": {
+            "error": "case-insensitive path collision: 'old' vs 'new'",
+        }
+    }
+    assert build_error_text(payload, "CUSA12878", 1) == payload["CUSA12878"]["error"]
+
+
+def test_build_error_text_falls_back_to_exit_code() -> None:
+    assert build_error_text(None, "CUSA12878", 1) == (
+        "код 1; подробности находятся в журнале"
+    )

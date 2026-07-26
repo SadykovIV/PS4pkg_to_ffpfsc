@@ -15,7 +15,7 @@ Homebrew, Python или внешних приложений.
 
 Готовый Release для Apple Silicon не требует Homebrew, Python, Qt, MkPFS или
 этого репозитория. Распакуйте
-`PS4-FFPFSC-v0.2.0-macos-arm64.zip`, перенесите `PS4 FFPFSC.app` в
+`PS4-FFPFSC-v0.2.1-macos-arm64.zip`, перенесите `PS4 FFPFSC.app` в
 `/Applications` и откройте. Текущий Release подписан ad-hoc, поэтому при первом
 запуске используйте **Control-клик → Открыть**.
 
