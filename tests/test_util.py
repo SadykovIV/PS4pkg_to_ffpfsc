@@ -9,7 +9,9 @@ from ps4ffpsc.util import (
     content_id_parts,
     ensure_within,
     entitlement_label,
+    link_or_copy_file_atomic,
     sanitize_component,
+    stage_file_atomic,
     tree_manifest,
     validate_title_id,
     version_key,
@@ -70,6 +72,56 @@ def test_unicode_tree_and_host_metadata(tmp_path: Path) -> None:
     assert [entry["path"] for entry in manifest] == ["файл.txt"]
 
 
+def test_atomic_staging_prefers_hardlink_without_mutating_source(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.bin"
+    destination = tmp_path / "work" / "destination.bin"
+    source.write_bytes(b"original")
+
+    linked = link_or_copy_file_atomic(source, destination)
+
+    assert destination.read_bytes() == b"original"
+    if linked:
+        assert os.path.samefile(source, destination)
+    replacement = destination.with_name("replacement.partial")
+    replacement.write_bytes(b"replacement")
+    os.replace(replacement, destination)
+    assert source.read_bytes() == b"original"
+    assert destination.read_bytes() == b"replacement"
+
+
+def test_atomic_staging_falls_back_to_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.bin"
+    destination = tmp_path / "work" / "destination.bin"
+    source.write_bytes(b"portable")
+
+    def fail_link(*_args: object, **_kwargs: object) -> None:
+        raise OSError("hardlinks unavailable")
+
+    monkeypatch.setattr(os, "link", fail_link)
+    assert not link_or_copy_file_atomic(source, destination)
+    assert destination.read_bytes() == b"portable"
+
+
+def test_consumable_staging_moves_when_hardlinks_are_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.bin"
+    destination = tmp_path / "work" / "destination.bin"
+    source.write_bytes(b"move instead of duplicate")
+
+    def fail_link(*_args: object, **_kwargs: object) -> None:
+        raise OSError("hardlinks unavailable")
+
+    monkeypatch.setattr(os, "link", fail_link)
+    assert stage_file_atomic(source, destination, consume_source=True) == "moved"
+    assert not source.exists()
+    assert destination.read_bytes() == b"move instead of duplicate"
+
+
 def test_sparse_file_larger_than_4gib_when_supported(tmp_path: Path) -> None:
     path = tmp_path / "large sparse.bin"
     try:
@@ -79,4 +131,3 @@ def test_sparse_file_larger_than_4gib_when_supported(tmp_path: Path) -> None:
     except OSError:
         pytest.skip("filesystem does not support sparse files above 4 GiB")
     assert path.stat().st_size == 4 * 1024**3 + 1
-

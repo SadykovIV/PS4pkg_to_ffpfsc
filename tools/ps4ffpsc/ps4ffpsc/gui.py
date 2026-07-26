@@ -5,6 +5,7 @@ import os
 import shutil
 import tempfile
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -35,9 +36,12 @@ from PySide6.QtWidgets import (
 
 from .gui_model import (
     build_error_text,
+    estimate_remaining_seconds,
+    format_duration,
     game_block_reason,
     inventory_summary,
     package_version_text,
+    parse_progress_event,
     scan_inventory_path,
     source_cli_arguments,
     temporary_cli_arguments,
@@ -57,6 +61,272 @@ from .runtime import (
 APP_NAME = "PS4 FFPFSC"
 APP_VERSION = "0.2.2"
 CREATE_NO_WINDOW = 0x08000000
+BUILD_STAGE_START = {1: 2.0, 2: 30.0, 3: 55.0, 4: 88.0, 5: 96.0}
+BUILD_STAGE_KEYS = {
+    1: "stage_sources",
+    2: "stage_merge",
+    3: "stage_compress",
+    4: "stage_verify",
+    5: "stage_checksum_cleanup",
+}
+MKPFS_PHASE_KEYS = {
+    "scan": "phase_scan",
+    "exfat": "phase_exfat",
+    "compress": "phase_compress",
+    "write": "phase_write",
+    "verify": "phase_verify",
+    "compare": "phase_compare",
+}
+TEXTS = {
+    "ru": {
+        "subtitle": "Подготовка проверенных образов для ShadowMountPlus — локально и без изменения исходных PKG",
+        "about": "О программе",
+        "source_section": "1. Исходные пакеты",
+        "choose_pkg": "Выбрать PKG-файлы…",
+        "choose_folder": "Выбрать папку…",
+        "clear": "Очистить",
+        "scan": "Сканировать",
+        "storage_section": "2. Папки хранения",
+        "output_files": "Готовые FFPFSC",
+        "temp_files": "Временные файлы (по умолчанию /tmp)",
+        "reset_tmp": "Сбросить /tmp",
+        "games_section": "3. Найденные игры",
+        "summary_initial": "Сначала выберите источник и запустите сканирование",
+        "header_build": "Собрать",
+        "header_type": "TITLE_ID / тип",
+        "header_name": "Название / файл",
+        "header_version": "Версия",
+        "log": "Журнал",
+        "clear_log": "Очистить журнал",
+        "compatibility": "Совместимость:",
+        "compat_current": "Текущий ShadowMountPlus",
+        "compat_patched": "ShadowMountPlus с патчем",
+        "dlc": "DLC:",
+        "dlc_auto": "Авто (подготовить, не встраивать)",
+        "dlc_separate": "Отдельные образы (экспериментально)",
+        "dlc_off": "Не включать",
+        "resume": "Продолжать прерванное",
+        "force": "Пересобрать существующее",
+        "keep_inner": "Сохранить внутренний exFAT",
+        "ready": "Готово",
+        "timing_idle": "Прошло 00:00 · осталось —",
+        "timing_calculating": "Прошло 00:00 · осталось: рассчитывается…",
+        "timing": "Прошло {elapsed} · осталось {remaining}",
+        "calculating": "рассчитывается…",
+        "cancel": "Отменить",
+        "reveal": "Открыть папку результата",
+        "build_selected": "Собрать выбранные",
+        "check_readiness": "Проверить готовность",
+        "choose_pkg_title": "Выберите PS4 PKG",
+        "pkg_filter": "PlayStation 4 PKG (*.pkg *.PKG);;Все файлы (*)",
+        "choose_source_folder": "Выберите папку с PKG (подпапки будут просканированы)",
+        "choose_output": "Куда сохранять FFPFSC",
+        "choose_temp": "Папка для временных файлов",
+        "free_space": "свободно {gib:.1f} GiB",
+        "directory_will_create": "каталог будет создан при сборке",
+        "source_not_selected": "Источник не выбран",
+        "source_empty": "PKG-файлы или папка ещё не выбраны",
+        "source_recursive": "будут просмотрены все подпапки",
+        "and_more": "… и ещё {count}",
+        "stage_word": "этап",
+        "stage_sources": "проверка и извлечение PKG",
+        "stage_merge": "объединение base и patch",
+        "stage_compress": "сжатие FFPFSC",
+        "stage_verify": "проверка результата",
+        "stage_checksum_cleanup": "контрольная сумма и очистка",
+        "phase_scan": "анализ файлов",
+        "phase_exfat": "создание exFAT",
+        "phase_compress": "сжатие",
+        "phase_write": "запись образа",
+        "phase_verify": "проверка блоков",
+        "phase_compare": "сверка данных",
+        "processing": "обработка",
+        "game": "Игра",
+        "check_pkg": "проверка PKG",
+        "extract_pkg": "извлечение PKG",
+        "merge_pkg": "объединение PKG",
+        "checksum": "контрольная сумма",
+        "cleanup_temp": "очистка временных файлов",
+        "stage_status": "{title} · этап {stage}/{total}: {action}",
+        "pkg_status": "{title} · этап 1/5: {action} {current}/{total} · {percent}%",
+        "merge_status": "{title} · этап 2/5: объединение PKG {current}/{total}",
+        "phase_status": "{title} · этап {stage}/5: {action} · {percent}%",
+        "checksum_status": "{title} · этап 5/5: контрольная сумма · {percent}%",
+        "cleanup_status": "{title} · этап 5/5: очистка временных файлов",
+        "scan_none": "Сканирование: PKG не найдены",
+        "scan_progress": "Сканирование PKG: {current}/{total}",
+        "scanning": "Сканирование…",
+        "scan_log": "Сканирование PKG и чтение метаданных…",
+        "source_missing_title": "Источник не выбран",
+        "pkg_select_error": "Не удалось выбрать PKG",
+        "no_buildable": "Нет игры, готовой к сборке.\n\n{details}",
+        "select_buildable": "Отметьте хотя бы одну готовую к сборке игру.",
+        "build_unavailable": "Сборка пока невозможна",
+        "check_paths": "Проверьте пути",
+        "build_started": "Запущена сборка: {titles}. Исходные PKG не изменяются.",
+        "build_preparing": "{title} · подготовка к сборке",
+        "build_flow": "──── {title}: извлечение → объединение → FFPFSC → проверка",
+        "worker_missing": "Не найден рабочий модуль",
+        "environment_unready": "Окружение не готово",
+        "venv_missing": "Не найден .venv. Один раз запустите scripts/bootstrap_macos.sh.",
+        "cli_missing": "Не найден CLI",
+        "process_start_error": "Не удалось запустить процесс",
+        "scan_error": "Ошибка сканирования",
+        "scan_failed_title": "Сканирование завершилось с ошибкой",
+        "exit_details": "Код {code}. Подробности находятся в журнале.",
+        "build_success_log": "{title}: сборка и проверка успешно завершены.",
+        "build_error_log": "{title}: ошибка — {error}",
+        "cancelled_log": "Операция отменена пользователем; временные данные можно продолжить позже.",
+        "process_error": "Ошибка процесса: {error}",
+        "read_results_error": "Ошибка чтения результатов",
+        "inventory_read_error": "Не удалось прочитать инвентарь",
+        "scan_complete": "Сканирование завершено",
+        "found_log": "Найдено: PKG {packages}, игр {games}, готово к сборке {buildable}, неподдерживаемых {unsupported}.",
+        "patches_tooltip": "Будут применены патчи: {patches}",
+        "none": "нет",
+        "duplicate": "Дубликат: {path}",
+        "unsupported": "Неподдерживаемые или зашифрованные PKG: {count}",
+        "inventory_summary": "Игр: {games} · к сборке: {buildable} · неподдерживаемых: {unsupported}",
+        "cancelled": "Отменено",
+        "completed_errors": "Завершено с ошибками",
+        "unknown_error": "неизвестная ошибка",
+        "not_all_built": "Не все образы собраны",
+        "success_count": "Успешно: {count}.\n\n{details}",
+        "all_ready": "Все выбранные образы готовы",
+        "build_complete_title": "Сборка завершена",
+        "build_complete_message": "Успешно собрано и проверено: {count}.\n\n{path}",
+        "cancelling": "Отмена…",
+        "cancel_requested": "Запрошена отмена. Процесс будет остановлен безопасно.",
+        "about_title": "О программе {app}",
+        "about_body": "GUI для локального конвейера PS4 PKG → FFPFSC. Поддерживаются только законно полученные PKG, которые может прочитать приложенный shadPS4 0.7.0. Исходные файлы не изменяются.<br><br>Готовый образ создаётся MkPFS и проходит автоматическую проверку.",
+        "operation_running": "Операция выполняется",
+        "close_running": "Остановить текущую операцию и закрыть программу?",
+    },
+    "en": {
+        "subtitle": "Build verified ShadowMountPlus images locally without modifying source PKGs",
+        "about": "About",
+        "source_section": "1. Source packages",
+        "choose_pkg": "Choose PKG files…",
+        "choose_folder": "Choose folder…",
+        "clear": "Clear",
+        "scan": "Scan",
+        "storage_section": "2. Storage folders",
+        "output_files": "Completed FFPFSC files",
+        "temp_files": "Temporary files (default: system temp)",
+        "reset_tmp": "Reset to system temp",
+        "games_section": "3. Discovered games",
+        "summary_initial": "Select a source and start scanning",
+        "header_build": "Build",
+        "header_type": "TITLE_ID / type",
+        "header_name": "Title / file",
+        "header_version": "Version",
+        "log": "Log",
+        "clear_log": "Clear log",
+        "compatibility": "Compatibility:",
+        "compat_current": "Current ShadowMountPlus",
+        "compat_patched": "Patched ShadowMountPlus",
+        "dlc": "DLC:",
+        "dlc_auto": "Auto (prepare, do not embed)",
+        "dlc_separate": "Separate images (experimental)",
+        "dlc_off": "Exclude",
+        "resume": "Resume interrupted work",
+        "force": "Rebuild existing output",
+        "keep_inner": "Keep inner exFAT",
+        "ready": "Ready",
+        "timing_idle": "Elapsed 00:00 · remaining —",
+        "timing_calculating": "Elapsed 00:00 · remaining: calculating…",
+        "timing": "Elapsed {elapsed} · remaining {remaining}",
+        "calculating": "calculating…",
+        "cancel": "Cancel",
+        "reveal": "Open output folder",
+        "build_selected": "Build selected",
+        "check_readiness": "Check readiness",
+        "choose_pkg_title": "Select PS4 PKGs",
+        "pkg_filter": "PlayStation 4 PKG (*.pkg *.PKG);;All files (*)",
+        "choose_source_folder": "Select a PKG folder (subfolders will be scanned)",
+        "choose_output": "Select the FFPFSC output folder",
+        "choose_temp": "Select the temporary files folder",
+        "free_space": "{gib:.1f} GiB free",
+        "directory_will_create": "directory will be created during build",
+        "source_not_selected": "Source not selected",
+        "source_empty": "No PKG files or folder selected",
+        "source_recursive": "all subfolders will be scanned",
+        "and_more": "… and {count} more",
+        "stage_word": "stage",
+        "stage_sources": "validate and extract PKGs",
+        "stage_merge": "merge base and patches",
+        "stage_compress": "compress FFPFSC",
+        "stage_verify": "verify the result",
+        "stage_checksum_cleanup": "checksum and cleanup",
+        "phase_scan": "scan files",
+        "phase_exfat": "create exFAT",
+        "phase_compress": "compress",
+        "phase_write": "write image",
+        "phase_verify": "verify blocks",
+        "phase_compare": "compare data",
+        "processing": "processing",
+        "game": "Game",
+        "check_pkg": "verify PKG",
+        "extract_pkg": "extract PKG",
+        "merge_pkg": "merge PKG",
+        "checksum": "checksum",
+        "cleanup_temp": "clean temporary files",
+        "stage_status": "{title} · stage {stage}/{total}: {action}",
+        "pkg_status": "{title} · stage 1/5: {action} {current}/{total} · {percent}%",
+        "merge_status": "{title} · stage 2/5: merge PKG {current}/{total}",
+        "phase_status": "{title} · stage {stage}/5: {action} · {percent}%",
+        "checksum_status": "{title} · stage 5/5: checksum · {percent}%",
+        "cleanup_status": "{title} · stage 5/5: clean temporary files",
+        "scan_none": "Scanning: no PKGs found",
+        "scan_progress": "Scanning PKGs: {current}/{total}",
+        "scanning": "Scanning…",
+        "scan_log": "Scanning PKGs and reading metadata…",
+        "source_missing_title": "Source not selected",
+        "pkg_select_error": "Could not select PKG",
+        "no_buildable": "No game is ready to build.\n\n{details}",
+        "select_buildable": "Select at least one buildable game.",
+        "build_unavailable": "Build is not available",
+        "check_paths": "Check the selected paths",
+        "build_started": "Build started: {titles}. Source PKGs will not be modified.",
+        "build_preparing": "{title} · preparing build",
+        "build_flow": "──── {title}: extract → merge → FFPFSC → verify",
+        "worker_missing": "Worker module not found",
+        "environment_unready": "Environment is not ready",
+        "venv_missing": ".venv was not found. Run scripts/bootstrap_macos.sh once.",
+        "cli_missing": "CLI not found",
+        "process_start_error": "Could not start the worker",
+        "scan_error": "Scan error",
+        "scan_failed_title": "Scanning failed",
+        "exit_details": "Exit code {code}. See the log for details.",
+        "build_success_log": "{title}: build and verification completed successfully.",
+        "build_error_log": "{title}: error — {error}",
+        "cancelled_log": "Operation cancelled; temporary data can be resumed later.",
+        "process_error": "Worker error: {error}",
+        "read_results_error": "Could not read results",
+        "inventory_read_error": "Could not read inventory",
+        "scan_complete": "Scanning completed",
+        "found_log": "Found: {packages} PKGs, {games} games, {buildable} buildable, {unsupported} unsupported.",
+        "patches_tooltip": "Patches to apply: {patches}",
+        "none": "none",
+        "duplicate": "Duplicate: {path}",
+        "unsupported": "Unsupported or encrypted PKGs: {count}",
+        "inventory_summary": "Games: {games} · buildable: {buildable} · unsupported: {unsupported}",
+        "cancelled": "Cancelled",
+        "completed_errors": "Completed with errors",
+        "unknown_error": "unknown error",
+        "not_all_built": "Some images were not built",
+        "success_count": "Successful: {count}.\n\n{details}",
+        "all_ready": "All selected images are ready",
+        "build_complete_title": "Build completed",
+        "build_complete_message": "Successfully built and verified: {count}.\n\n{path}",
+        "cancelling": "Cancelling…",
+        "cancel_requested": "Cancellation requested. The worker will stop safely.",
+        "about_title": "About {app}",
+        "about_body": "GUI for the local PS4 PKG → FFPFSC pipeline. Only legally obtained PKGs supported by the bundled shadPS4 0.7.0 reader are accepted. Source files are never modified.<br><br>The output image is created with MkPFS and verified automatically.",
+        "operation_running": "Operation in progress",
+        "close_running": "Stop the current operation and close the application?",
+    },
+}
 
 
 def _hide_windows_worker_console(arguments: Any) -> None:
@@ -69,6 +339,12 @@ class MainWindow(QMainWindow):
         self.root = root
         self.resources = resources or root
         self.settings = QSettings()
+        stored_language = self.settings.value("language", "ru", type=str)
+        self.language = stored_language if stored_language in TEXTS else "ru"
+        self.translated_widgets: list[tuple[QWidget, str]] = []
+        self.stage_state: tuple[str, dict[str, Any]] = ("ready", {})
+        self.summary_state: tuple[str, dict[str, Any]] = ("summary_initial", {})
+        self.last_timing: tuple[float, str] | None = None
         self.process = QProcess(self)
         self.process.setProcessChannelMode(QProcess.ProcessChannelMode.SeparateChannels)
         self.process.readyReadStandardOutput.connect(self._read_stdout)
@@ -87,14 +363,129 @@ class MainWindow(QMainWindow):
         self.source_folder: Path | None = None
         self.inventory: dict[str, Any] | None = None
         self.stdout_buffer = ""
+        self.stderr_buffer = ""
         self.operation: str | None = None
         self.build_queue: list[str] = []
         self.build_results: dict[str, Any] = {}
+        self.build_total_count = 0
+        self.current_build_title: str | None = None
+        self.current_build_stage = 0
         self.cancel_requested = False
+        self.progress_kind: str | None = None
+        self.progress_started_at: float | None = None
+        self.progress_percent = 0.0
+        self.scan_total = 0
+        self.scan_seen = 0
+        self.progress_timer = QTimer(self)
+        self.progress_timer.setInterval(1000)
+        self.progress_timer.timeout.connect(self._update_elapsed_time)
 
         self._build_ui()
         self._restore_settings()
         self._update_source_label()
+        self._update_controls()
+
+    def _t(self, key: str, **values: Any) -> str:
+        text = TEXTS[self.language].get(key, TEXTS["ru"].get(key, key))
+        return text.format(**values) if values else text
+
+    def _bind_text(self, widget: QWidget, key: str) -> QWidget:
+        self.translated_widgets.append((widget, key))
+        widget.setProperty("translationKey", key)
+        if hasattr(widget, "setText"):
+            widget.setText(self._t(key))
+        return widget
+
+    def _set_stage(self, key: str, **values: Any) -> None:
+        self.stage_state = (key, values)
+        self._render_stage()
+
+    def _render_stage(self) -> None:
+        key, values = self.stage_state
+        rendered = dict(values)
+        for name, value in values.items():
+            if name.endswith("_key"):
+                rendered[name.removesuffix("_key")] = self._t(str(value))
+        self.stage_label.setText(self._t(key, **rendered))
+
+    def _set_summary(self, key: str, **values: Any) -> None:
+        self.summary_state = (key, values)
+        self.summary_label.setText(self._t(key, **values))
+
+    def _render_last_timing(self) -> None:
+        if self.last_timing is None:
+            self.time_label.setText(self._t("timing_idle"))
+            return
+        elapsed, remaining = self.last_timing
+        self.time_label.setText(
+            self._t(
+                "timing",
+                elapsed=format_duration(elapsed),
+                remaining=remaining,
+            )
+        )
+
+    def _change_language(self, _index: int) -> None:
+        language = self.language_combo.currentData()
+        if language not in TEXTS or language == self.language:
+            return
+        self.language = str(language)
+        self.settings.setValue("language", self.language)
+        self._retranslate_ui()
+
+    def _retranslate_ui(self) -> None:
+        for widget, key in self.translated_widgets:
+            if hasattr(widget, "setText"):
+                widget.setText(self._t(key))
+        self.games_tree.setHeaderLabels(
+            [
+                self._t("header_build"),
+                self._t("header_type"),
+                self._t("header_name"),
+                self._t("header_version"),
+                "Patch",
+                "DLC",
+            ]
+        )
+        combo_text = {
+            "current-smp": "compat_current",
+            "patched-smp": "compat_patched",
+        }
+        for index in range(self.compat_combo.count()):
+            self.compat_combo.setItemText(
+                index, self._t(combo_text[str(self.compat_combo.itemData(index))])
+            )
+        dlc_text = {
+            "auto": "dlc_auto",
+            "separate": "dlc_separate",
+            "off": "dlc_off",
+        }
+        for index in range(self.dlc_combo.count()):
+            self.dlc_combo.setItemText(
+                index, self._t(dlc_text[str(self.dlc_combo.itemData(index))])
+            )
+        self._update_source_label()
+        self._update_storage_labels()
+        if self.inventory is not None:
+            checked = {
+                str(self.games_tree.topLevelItem(index).data(0, Qt.ItemDataRole.UserRole))
+                for index in range(self.games_tree.topLevelItemCount())
+                if self.games_tree.topLevelItem(index).checkState(0)
+                == Qt.CheckState.Checked
+            }
+            self._populate_inventory()
+            for index in range(self.games_tree.topLevelItemCount()):
+                item = self.games_tree.topLevelItem(index)
+                title_id = item.data(0, Qt.ItemDataRole.UserRole)
+                if title_id and str(title_id) not in checked:
+                    item.setCheckState(0, Qt.CheckState.Unchecked)
+        self._render_stage()
+        summary_key, summary_values = self.summary_state
+        self.summary_label.setText(self._t(summary_key, **summary_values))
+        if self.progress_started_at is not None:
+            self._update_elapsed_time()
+        else:
+            self._render_last_timing()
         self._update_controls()
 
     def _build_ui(self) -> None:
@@ -116,16 +507,21 @@ class MainWindow(QMainWindow):
         title_box = QVBoxLayout()
         title = QLabel("PS4 PKG → FFPFSC")
         title.setObjectName("pageTitle")
-        subtitle = QLabel(
-            "Подготовка проверенных образов для ShadowMountPlus — локально и без изменения исходных PKG"
-        )
+        subtitle = self._bind_text(QLabel(), "subtitle")
         subtitle.setObjectName("subtitle")
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
         header.addWidget(mark)
         header.addLayout(title_box)
         header.addStretch()
-        about = QPushButton("О программе")
+        self.language_combo = QComboBox()
+        self.language_combo.addItem("Русский", "ru")
+        self.language_combo.addItem("English", "en")
+        self.language_combo.setCurrentIndex(0 if self.language == "ru" else 1)
+        self.language_combo.setFixedWidth(105)
+        self.language_combo.currentIndexChanged.connect(self._change_language)
+        header.addWidget(self.language_combo)
+        about = self._bind_text(QPushButton(), "about")
         about.setObjectName("quietButton")
         about.clicked.connect(self._show_about)
         header.addWidget(about)
@@ -138,7 +534,7 @@ class MainWindow(QMainWindow):
         source_layout.setHorizontalSpacing(10)
         source_layout.setVerticalSpacing(12)
 
-        source_title = QLabel("1. Исходные пакеты")
+        source_title = self._bind_text(QLabel(), "source_section")
         source_title.setObjectName("sectionTitle")
         source_layout.addWidget(source_title, 0, 0, 1, 4)
         self.source_label = QLabel()
@@ -147,14 +543,14 @@ class MainWindow(QMainWindow):
         self.source_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         source_layout.addWidget(self.source_label, 1, 0, 1, 4)
 
-        choose_files = QPushButton("Выбрать PKG-файлы…")
+        choose_files = self._bind_text(QPushButton(), "choose_pkg")
         choose_files.clicked.connect(self._choose_files)
-        choose_folder = QPushButton("Выбрать папку…")
+        choose_folder = self._bind_text(QPushButton(), "choose_folder")
         choose_folder.clicked.connect(self._choose_folder)
-        clear_source = QPushButton("Очистить")
+        clear_source = self._bind_text(QPushButton(), "clear")
         clear_source.setObjectName("quietButton")
         clear_source.clicked.connect(self._clear_source)
-        self.scan_button = QPushButton("Сканировать")
+        self.scan_button = self._bind_text(QPushButton(), "scan")
         self.scan_button.setObjectName("primaryButton")
         self.scan_button.clicked.connect(self._start_scan)
         source_layout.addWidget(choose_files, 2, 0)
@@ -162,29 +558,29 @@ class MainWindow(QMainWindow):
         source_layout.addWidget(clear_source, 2, 2)
         source_layout.addWidget(self.scan_button, 2, 3)
 
-        output_title = QLabel("2. Папки хранения")
+        output_title = self._bind_text(QLabel(), "storage_section")
         output_title.setObjectName("sectionTitle")
         source_layout.addWidget(output_title, 3, 0, 1, 4)
-        source_layout.addWidget(QLabel("Готовые FFPFSC"), 4, 0, 1, 4)
+        output_files_label = self._bind_text(QLabel(), "output_files")
+        source_layout.addWidget(output_files_label, 4, 0, 1, 4)
         self.output_label = QLabel()
         self.output_label.setObjectName("pathLabel")
         self.output_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         source_layout.addWidget(self.output_label, 5, 0, 1, 3)
-        output_button = QPushButton("Выбрать папку…")
+        output_button = self._bind_text(QPushButton(), "choose_folder")
         output_button.clicked.connect(self._choose_output)
         source_layout.addWidget(output_button, 5, 3)
-        source_layout.addWidget(
-            QLabel("Временные файлы (по умолчанию /tmp)"), 6, 0, 1, 4
-        )
+        temp_files_label = self._bind_text(QLabel(), "temp_files")
+        source_layout.addWidget(temp_files_label, 6, 0, 1, 4)
         self.temp_label = QLabel()
         self.temp_label.setObjectName("pathLabel")
         self.temp_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         source_layout.addWidget(self.temp_label, 7, 0, 1, 2)
-        reset_temp = QPushButton("Сбросить /tmp")
+        reset_temp = self._bind_text(QPushButton(), "reset_tmp")
         reset_temp.setObjectName("quietButton")
         reset_temp.clicked.connect(self._reset_temp)
         source_layout.addWidget(reset_temp, 7, 2)
-        temp_button = QPushButton("Выбрать папку…")
+        temp_button = self._bind_text(QPushButton(), "choose_folder")
         temp_button.clicked.connect(self._choose_temp)
         source_layout.addWidget(temp_button, 7, 3)
         source_layout.setColumnStretch(2, 1)
@@ -198,9 +594,9 @@ class MainWindow(QMainWindow):
         games_layout = QVBoxLayout(games_card)
         games_layout.setContentsMargins(18, 14, 18, 14)
         games_header = QHBoxLayout()
-        games_title = QLabel("3. Найденные игры")
+        games_title = self._bind_text(QLabel(), "games_section")
         games_title.setObjectName("sectionTitle")
-        self.summary_label = QLabel("Сначала выберите источник и запустите сканирование")
+        self.summary_label = QLabel(self._t("summary_initial"))
         self.summary_label.setObjectName("summary")
         games_header.addWidget(games_title)
         games_header.addStretch()
@@ -210,7 +606,14 @@ class MainWindow(QMainWindow):
         self.games_tree = QTreeWidget()
         self.games_tree.setColumnCount(6)
         self.games_tree.setHeaderLabels(
-            ["Собрать", "TITLE_ID / тип", "Название / файл", "Версия", "Patch", "DLC"]
+            [
+                self._t("header_build"),
+                self._t("header_type"),
+                self._t("header_name"),
+                self._t("header_version"),
+                "Patch",
+                "DLC",
+            ]
         )
         self.games_tree.setRootIsDecorated(True)
         self.games_tree.setAlternatingRowColors(True)
@@ -233,9 +636,9 @@ class MainWindow(QMainWindow):
         log_layout = QVBoxLayout(log_card)
         log_layout.setContentsMargins(18, 12, 18, 14)
         log_header = QHBoxLayout()
-        log_title = QLabel("Журнал")
+        log_title = self._bind_text(QLabel(), "log")
         log_title.setObjectName("sectionTitle")
-        clear_log = QPushButton("Очистить журнал")
+        clear_log = self._bind_text(QPushButton(), "clear_log")
         clear_log.setObjectName("quietButton")
         clear_log.clicked.connect(self.log_edit_clear)
         log_header.addWidget(log_title)
@@ -254,23 +657,25 @@ class MainWindow(QMainWindow):
         options = QGridLayout()
         options.setHorizontalSpacing(10)
         options.setVerticalSpacing(5)
-        options.addWidget(QLabel("Совместимость:"), 0, 0)
+        compatibility_label = self._bind_text(QLabel(), "compatibility")
+        options.addWidget(compatibility_label, 0, 0)
         self.compat_combo = QComboBox()
-        self.compat_combo.addItem("Текущий ShadowMountPlus", "current-smp")
-        self.compat_combo.addItem("ShadowMountPlus с патчем", "patched-smp")
+        self.compat_combo.addItem(self._t("compat_current"), "current-smp")
+        self.compat_combo.addItem(self._t("compat_patched"), "patched-smp")
         self.compat_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         options.addWidget(self.compat_combo, 0, 1)
-        options.addWidget(QLabel("DLC:"), 0, 2)
+        dlc_label = self._bind_text(QLabel(), "dlc")
+        options.addWidget(dlc_label, 0, 2)
         self.dlc_combo = QComboBox()
-        self.dlc_combo.addItem("Авто (подготовить, не встраивать)", "auto")
-        self.dlc_combo.addItem("Отдельные образы (экспериментально)", "separate")
-        self.dlc_combo.addItem("Не включать", "off")
+        self.dlc_combo.addItem(self._t("dlc_auto"), "auto")
+        self.dlc_combo.addItem(self._t("dlc_separate"), "separate")
+        self.dlc_combo.addItem(self._t("dlc_off"), "off")
         self.dlc_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         options.addWidget(self.dlc_combo, 0, 3)
-        self.resume_check = QCheckBox("Продолжать прерванное")
+        self.resume_check = self._bind_text(QCheckBox(), "resume")
         self.resume_check.setChecked(True)
-        self.force_check = QCheckBox("Пересобрать существующее")
-        self.keep_inner_check = QCheckBox("Сохранить внутренний exFAT")
+        self.force_check = self._bind_text(QCheckBox(), "force")
+        self.keep_inner_check = self._bind_text(QCheckBox(), "keep_inner")
         options.addWidget(self.resume_check, 1, 1)
         options.addWidget(self.force_check, 1, 2)
         options.addWidget(self.keep_inner_check, 1, 3)
@@ -278,24 +683,33 @@ class MainWindow(QMainWindow):
         page.addLayout(options)
 
         footer = QHBoxLayout()
-        self.stage_label = QLabel("Готово")
+        self.stage_label = QLabel(self._t("ready"))
         self.stage_label.setObjectName("stage")
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
-        self.progress.setTextVisible(False)
-        self.progress.setFixedWidth(210)
-        self.cancel_button = QPushButton("Отменить")
+        self.progress.setFormat("%p%")
+        self.progress.setTextVisible(True)
+        self.progress.setMinimumWidth(260)
+        self.progress.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self.time_label = QLabel(self._t("timing_idle"))
+        self.time_label.setObjectName("timing")
+        self.cancel_button = self._bind_text(QPushButton(), "cancel")
         self.cancel_button.setObjectName("dangerButton")
         self.cancel_button.clicked.connect(self._cancel)
-        self.reveal_button = QPushButton("Открыть папку результата")
+        self.reveal_button = self._bind_text(QPushButton(), "reveal")
         self.reveal_button.clicked.connect(self._reveal_output)
-        self.build_button = QPushButton("Собрать выбранные")
+        self.build_button = QPushButton(self._t("build_selected"))
         self.build_button.setObjectName("primaryButton")
         self.build_button.clicked.connect(self._start_build)
-        footer.addWidget(self.stage_label)
-        footer.addWidget(self.progress)
-        footer.addStretch()
+        status_box = QVBoxLayout()
+        status_box.setSpacing(2)
+        status_box.addWidget(self.stage_label)
+        status_box.addWidget(self.time_label)
+        footer.addLayout(status_box, 2)
+        footer.addWidget(self.progress, 3)
         footer.addWidget(self.cancel_button)
         footer.addWidget(self.reveal_button)
         footer.addWidget(self.build_button)
@@ -316,7 +730,8 @@ class MainWindow(QMainWindow):
                 background: #0c1015; border: 1px solid #2a3340; border-radius: 7px;
                 color: #bfcbe0; padding: 8px; min-height: 18px;
             }
-            QLabel#stage { color: #aebbd0; }
+            QLabel#stage { color: #d5deec; font-weight: 600; }
+            QLabel#timing { color: #8290a5; font-size: 11px; }
             QFrame#card {
                 background: #181e27; border: 1px solid #2b3543; border-radius: 10px;
             }
@@ -345,7 +760,11 @@ class MainWindow(QMainWindow):
                 background: #202936; border: 1px solid #374355; border-radius: 6px;
                 padding: 6px 10px;
             }
-            QProgressBar { background: #202936; border: none; border-radius: 4px; height: 8px; }
+            QProgressBar {
+                background: #202936; border: none; border-radius: 6px;
+                min-height: 18px; color: white; font-size: 11px; font-weight: 700;
+                text-align: center;
+            }
             QProgressBar::chunk { background: #536dfe; border-radius: 4px; }
             QSplitter::handle { background: transparent; height: 8px; }
             """
@@ -379,22 +798,23 @@ class MainWindow(QMainWindow):
         start = str(self.source_folder or self.root / "pkg")
         names, _ = QFileDialog.getOpenFileNames(
             self,
-            "Выберите PS4 PKG",
+            self._t("choose_pkg_title"),
             start,
-            "PlayStation 4 PKG (*.pkg *.PKG);;Все файлы (*)",
+            self._t("pkg_filter"),
         )
         if not names:
             return
         try:
-            _, files, _ = validate_source("files", names, None)
+            _, files, _ = validate_source("files", names, None, self.language)
         except (OSError, ValueError) as error:
-            self._show_error("Не удалось выбрать PKG", str(error))
+            self._show_error(self._t("pkg_select_error"), str(error))
             return
         self.source_mode = "files"
         self.pkg_files = files
         self.source_folder = None
         self.inventory = None
         self.games_tree.clear()
+        self._set_summary("summary_initial")
         self._update_source_label()
         self._update_controls()
 
@@ -402,7 +822,7 @@ class MainWindow(QMainWindow):
         start = str(self.source_folder or self.root / "pkg")
         name = QFileDialog.getExistingDirectory(
             self,
-            "Выберите папку с PKG (подпапки будут просканированы)",
+            self._t("choose_source_folder"),
             start,
             QFileDialog.Option.ShowDirsOnly,
         )
@@ -413,6 +833,7 @@ class MainWindow(QMainWindow):
         self.pkg_files = ()
         self.inventory = None
         self.games_tree.clear()
+        self._set_summary("summary_initial")
         self._update_source_label()
         self._update_controls()
         self._save_settings()
@@ -420,7 +841,7 @@ class MainWindow(QMainWindow):
     def _choose_output(self) -> None:
         name = QFileDialog.getExistingDirectory(
             self,
-            "Куда сохранять FFPFSC",
+            self._t("choose_output"),
             str(self.output_dir),
             QFileDialog.Option.ShowDirsOnly,
         )
@@ -439,7 +860,7 @@ class MainWindow(QMainWindow):
         )
         name = QFileDialog.getExistingDirectory(
             self,
-            "Папка для временных файлов",
+            self._t("choose_temp"),
             start,
             QFileDialog.Option.ShowDirsOnly,
         )
@@ -461,9 +882,9 @@ class MainWindow(QMainWindow):
         try:
             probe = self.temp_dir if self.temp_dir.exists() else self.temp_dir.parent
             free = shutil.disk_usage(probe).free
-            detail += f"  ·  свободно {free / 1024**3:.1f} GiB"
+            detail += "  ·  " + self._t("free_space", gib=free / 1024**3)
         except OSError:
-            detail += "  ·  каталог будет создан при сборке"
+            detail += "  ·  " + self._t("directory_will_create")
         self.temp_label.setText(detail)
         self.temp_label.setToolTip(str(self.temp_dir))
 
@@ -472,7 +893,7 @@ class MainWindow(QMainWindow):
         self.source_folder = None
         self.inventory = None
         self.games_tree.clear()
-        self.summary_label.setText("Источник не выбран")
+        self._set_summary("source_not_selected")
         self._update_source_label()
         self._update_controls()
 
@@ -480,21 +901,26 @@ class MainWindow(QMainWindow):
         if self.source_mode == "files" and self.pkg_files:
             preview = ", ".join(path.name for path in self.pkg_files[:3])
             if len(self.pkg_files) > 3:
-                preview += f" … и ещё {len(self.pkg_files) - 3}"
+                preview += " " + self._t(
+                    "and_more", count=len(self.pkg_files) - 3
+                )
             self.source_label.setText(f"{len(self.pkg_files)} PKG: {preview}")
             self.source_label.setToolTip("\n".join(str(path) for path in self.pkg_files))
         elif self.source_folder:
             self.source_label.setText(
-                f"{self.source_folder}  ·  будут просмотрены все подпапки"
+                f"{self.source_folder}  ·  {self._t('source_recursive')}"
             )
             self.source_label.setToolTip(str(self.source_folder))
         else:
-            self.source_label.setText("PKG-файлы или папка ещё не выбраны")
+            self.source_label.setText(self._t("source_empty"))
             self.source_label.setToolTip("")
 
     def _source_arguments(self) -> list[str]:
         return source_cli_arguments(
-            self.source_mode, self.pkg_files, self.source_folder
+            self.source_mode,
+            self.pkg_files,
+            self.source_folder,
+            self.language,
         )
 
     def _base_arguments(self) -> list[str]:
@@ -520,16 +946,213 @@ class MainWindow(QMainWindow):
             arguments.append("--keep-inner-image")
         return arguments
 
+    def _begin_progress(self, kind: str) -> None:
+        self.progress_kind = kind
+        self.progress_started_at = time.monotonic()
+        self.progress_percent = 0.0
+        self.scan_total = 0
+        self.scan_seen = 0
+        self.current_build_stage = 0
+        self.last_timing = None
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.progress.setFormat("%p%")
+        self.time_label.setText(self._t("timing_calculating"))
+        self.progress_timer.start()
+
+    def _set_progress(
+        self,
+        value: float,
+        status_key: str | None = None,
+        **status_values: Any,
+    ) -> None:
+        if self.progress_started_at is None:
+            return
+        bounded = max(0.0, min(100.0, value))
+        self.progress_percent = max(self.progress_percent, bounded)
+        self.progress.setRange(0, 100)
+        self.progress.setValue(round(self.progress_percent))
+        if status_key:
+            self._set_stage(status_key, **status_values)
+        self._update_elapsed_time()
+
+    def _finish_progress(self, completed: bool) -> None:
+        if self.progress_started_at is None:
+            return
+        elapsed = time.monotonic() - self.progress_started_at
+        if completed:
+            self.progress_percent = 100.0
+            self.progress.setRange(0, 100)
+            self.progress.setValue(100)
+            remaining = "00:00"
+        else:
+            remaining = "—"
+        self.last_timing = (elapsed, remaining)
+        self._render_last_timing()
+        self.progress_timer.stop()
+        self.progress_started_at = None
+        self.progress_kind = None
+
+    def _update_elapsed_time(self) -> None:
+        if self.progress_started_at is None:
+            return
+        elapsed = time.monotonic() - self.progress_started_at
+        eta = estimate_remaining_seconds(elapsed, self.progress_percent)
+        if self.progress_percent >= 100:
+            remaining = "00:00"
+        elif eta is None or elapsed < 3 or self.progress_percent < 1:
+            remaining = self._t("calculating")
+        else:
+            remaining = f"≈ {format_duration(eta)}"
+        self.time_label.setText(
+            self._t(
+                "timing",
+                elapsed=format_duration(elapsed),
+                remaining=remaining,
+            )
+        )
+
+    def _set_build_progress(
+        self,
+        local_value: float,
+        status_key: str | None = None,
+        **status_values: Any,
+    ) -> None:
+        total = max(1, self.build_total_count)
+        completed = min(len(self.build_results), total)
+        overall = (
+            completed * 100.0 + max(0.0, min(100.0, local_value))
+        ) / total
+        self._set_progress(overall, status_key, **status_values)
+
+    @staticmethod
+    def _progress_ratio(event: dict[str, Any]) -> float:
+        try:
+            current = float(event.get("current", 0))
+            total = float(event.get("total", 0))
+        except (TypeError, ValueError):
+            return 0.0
+        return max(0.0, min(1.0, current / total)) if total > 0 else 0.0
+
+    def _handle_worker_progress(self, event: dict[str, Any]) -> None:
+        if self.progress_kind != "build":
+            return
+        title = self.current_build_title or self._t("game")
+        scope = str(event.get("scope") or "")
+        if event.get("action") == "status":
+            return
+        ratio = self._progress_ratio(event)
+        try:
+            package_index = max(1, int(event.get("package_index", 1)))
+            package_total = max(1, int(event.get("package_total", 1)))
+        except (TypeError, ValueError):
+            package_index = package_total = 1
+
+        if scope in {"source_hash", "extract"}:
+            segment = 0.20 * ratio if scope == "source_hash" else 0.20 + 0.80 * ratio
+            package_progress = (package_index - 1 + segment) / package_total
+            local = 2.0 + 28.0 * package_progress
+            action_key = "check_pkg" if scope == "source_hash" else "extract_pkg"
+            self._set_build_progress(
+                local,
+                "pkg_status",
+                title=title,
+                action_key=action_key,
+                current=package_index,
+                total=package_total,
+                percent=round(ratio * 100),
+            )
+            return
+        if scope == "merge_package":
+            local = 30.0 + 25.0 * ratio
+            self._set_build_progress(
+                local,
+                "merge_status",
+                title=title,
+                current=event.get("current", 0),
+                total=event.get("total", 0),
+            )
+            return
+        if scope == "mkpfs" and self.current_build_stage in {3, 4}:
+            phase_name = str(event.get("phase") or "")
+            phase_key = MKPFS_PHASE_KEYS.get(phase_name)
+            phase_values = (
+                {"action_key": phase_key}
+                if phase_key
+                else {"action": phase_name or self._t("processing")}
+            )
+            if self.current_build_stage == 3:
+                local = 55.0 + 33.0 * ratio
+            else:
+                local = 88.0 + 8.0 * ratio
+            self._set_build_progress(
+                local,
+                "phase_status",
+                title=title,
+                stage=self.current_build_stage,
+                percent=round(ratio * 100),
+                **phase_values,
+            )
+            return
+        if scope == "artifact_hash":
+            self._set_build_progress(
+                96.0 + 3.0 * ratio,
+                "checksum_status",
+                title=title,
+                percent=round(ratio * 100),
+            )
+            return
+        if scope == "cleanup":
+            self._set_build_progress(
+                99.0, "cleanup_status", title=title
+            )
+
+    def _handle_progress_line(self, line: str) -> bool:
+        event = parse_progress_event(line)
+        if event is None:
+            return False
+        kind = event.get("kind")
+        if kind == "scan_total" and self.progress_kind == "scan":
+            self.scan_total = max(0, int(event.get("total", 0)))
+            if self.scan_total == 0:
+                self._set_progress(95, "scan_none")
+        elif kind == "scan_item" and self.progress_kind == "scan":
+            self.scan_seen += 1
+            if self.scan_total:
+                percent = min(95.0, self.scan_seen * 95.0 / self.scan_total)
+                self._set_progress(
+                    percent,
+                    "scan_progress",
+                    current=self.scan_seen,
+                    total=self.scan_total,
+                )
+        elif kind == "build_stage" and self.progress_kind == "build":
+            stage = int(event.get("stage", 0))
+            self.current_build_stage = stage
+            stage_key = BUILD_STAGE_KEYS.get(stage, "processing")
+            self._set_build_progress(
+                BUILD_STAGE_START.get(stage, 0.0),
+                "stage_status",
+                title=self.current_build_title or self._t("game"),
+                stage=stage,
+                total=event.get("total", 5),
+                action_key=stage_key,
+            )
+        elif kind == "worker":
+            self._handle_worker_progress(event)
+        return kind == "worker"
+
     def _start_scan(self) -> None:
         try:
             self._source_arguments()
         except (OSError, ValueError) as error:
-            self._show_error("Источник не выбран", str(error))
+            self._show_error(self._t("source_missing_title"), str(error))
             return
         self.inventory = None
         self.games_tree.clear()
-        self.summary_label.setText("Сканирование…")
-        self._append_log("Сканирование PKG и чтение метаданных…")
+        self._set_summary("scanning")
+        self._append_log(self._t("scan_log"))
+        self._begin_progress("scan")
         self._start_process("scan", ["scan", *self._base_arguments()])
 
     def _start_build(self) -> None:
@@ -544,13 +1167,15 @@ class MainWindow(QMainWindow):
             if self.inventory:
                 for title_id, game in sorted(self.inventory.get("games", {}).items()):
                     if not game.get("buildable"):
-                        blocked.append(f"{title_id} — {game_block_reason(game)}")
+                        blocked.append(
+                            f"{title_id} — {game_block_reason(game, self.language)}"
+                        )
             detail = (
-                "Нет игры, готовой к сборке.\n\n" + "\n".join(blocked)
+                self._t("no_buildable", details="\n".join(blocked))
                 if blocked
-                else "Отметьте хотя бы одну готовую к сборке игру."
+                else self._t("select_buildable")
             )
-            self._show_error("Сборка пока невозможна", detail)
+            self._show_error(self._t("build_unavailable"), detail)
             return
         try:
             self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -564,13 +1189,16 @@ class MainWindow(QMainWindow):
                 pass
             self._source_arguments()
         except OSError as error:
-            self._show_error("Проверьте пути", str(error))
+            self._show_error(self._t("check_paths"), str(error))
             return
         self.build_queue = selected
         self.build_results = {}
+        self.build_total_count = len(selected)
+        self.current_build_title = None
         self.cancel_requested = False
+        self._begin_progress("build")
         self._append_log(
-            f"Запущена сборка: {', '.join(selected)}. Исходные PKG не изменяются."
+            self._t("build_started", titles=", ".join(selected))
         )
         self._start_next_build()
 
@@ -579,8 +1207,12 @@ class MainWindow(QMainWindow):
             self._finish_build_batch()
             return
         title_id = self.build_queue.pop(0)
-        self.stage_label.setText(f"Сборка {title_id}")
-        self._append_log(f"──── {title_id}: извлечение → объединение → FFPFSC → проверка")
+        self.current_build_title = title_id
+        self.current_build_stage = 0
+        self._set_build_progress(
+            0, "build_preparing", title=title_id
+        )
+        self._append_log(self._t("build_flow", title=title_id))
         self._start_process(
             f"build:{title_id}",
             ["build", title_id, *self._base_arguments()],
@@ -592,26 +1224,27 @@ class MainWindow(QMainWindow):
         if is_frozen():
             program = worker_executable()
             if not program.is_file():
-                self._show_error("Не найден рабочий модуль", str(program))
+                self._show_error(self._t("worker_missing"), str(program))
                 return
             process_arguments = ["--worker", *arguments]
         else:
             program = self.resources / ".venv" / "bin" / "python"
             if not program.is_file():
                 self._show_error(
-                    "Окружение не готово",
-                    "Не найден .venv. Один раз запустите scripts/bootstrap_macos.sh.",
+                    self._t("environment_unready"),
+                    self._t("venv_missing"),
                 )
                 return
             launcher = self.resources / "ps4ffpsc"
             if not launcher.is_file():
-                self._show_error("Не найден CLI", str(launcher))
+                self._show_error(self._t("cli_missing"), str(launcher))
                 return
             process_arguments = [str(launcher), *arguments]
         environment = QProcessEnvironment.systemEnvironment()
         environment.insert("PYTHONUNBUFFERED", "1")
         environment.insert("PYTHONUTF8", "1")
         environment.insert("PYTHONIOENCODING", "utf-8")
+        environment.insert("PS4FFPSC_GUI_PROGRESS", "1")
         environment.insert("PS4FFPSC_DATA_ROOT", str(self.root))
         environment.insert("PS4FFPSC_RESOURCE_ROOT", str(self.resources))
         self.process.setProcessEnvironment(environment)
@@ -619,19 +1252,19 @@ class MainWindow(QMainWindow):
         self.process.setProgram(str(program))
         self.process.setArguments(process_arguments)
         self.stdout_buffer = ""
+        self.stderr_buffer = ""
         self.operation = operation
         self.cancel_requested = False
-        self.progress.setRange(0, 0)
-        self.stage_label.setText(
-            "Сканирование…" if operation == "scan" else self.stage_label.text()
-        )
+        if operation == "scan":
+            self._set_stage("scanning")
         self._update_controls()
         self.process.start()
         if not self.process.waitForStarted(3000):
-            self._show_error("Не удалось запустить процесс", self.process.errorString())
+            self._show_error(
+                self._t("process_start_error"), self.process.errorString()
+            )
             self.operation = None
-            self.progress.setRange(0, 100)
-            self.progress.setValue(0)
+            self._finish_progress(False)
             self._update_controls()
 
     def _read_stdout(self) -> None:
@@ -640,7 +1273,17 @@ class MainWindow(QMainWindow):
 
     def _read_stderr(self) -> None:
         data = bytes(self.process.readAllStandardError()).decode("utf-8", errors="replace")
-        for line in data.splitlines():
+        self.stderr_buffer += data.replace("\r", "\n")
+        lines = self.stderr_buffer.split("\n")
+        self.stderr_buffer = lines.pop()
+        for line in lines:
+            if line and not self._handle_progress_line(line):
+                self._append_log(line)
+
+    def _flush_stderr(self) -> None:
+        line = self.stderr_buffer.strip()
+        self.stderr_buffer = ""
+        if line and not self._handle_progress_line(line):
             self._append_log(line)
 
     def _process_finished(
@@ -651,9 +1294,8 @@ class MainWindow(QMainWindow):
         operation = self.operation
         self._read_stdout()
         self._read_stderr()
+        self._flush_stderr()
         self.operation = None
-        self.progress.setRange(0, 100)
-        self.progress.setValue(100 if exit_code == 0 else 0)
 
         payload: Any = None
         if self.stdout_buffer.strip():
@@ -666,48 +1308,62 @@ class MainWindow(QMainWindow):
             if exit_code in (0, 3):
                 self._finish_scan(payload)
             else:
-                self.stage_label.setText("Ошибка сканирования")
+                self._finish_progress(False)
+                self._set_stage("scan_error")
                 self._show_error(
-                    "Сканирование завершилось с ошибкой",
-                    f"Код {exit_code}. Подробности находятся в журнале.",
+                    self._t("scan_failed_title"),
+                    self._t("exit_details", code=exit_code),
                 )
         elif operation and operation.startswith("build:"):
             title_id = operation.split(":", 1)[1]
             if exit_code == 0:
                 self.build_results[title_id] = payload or {"status": "completed"}
-                self._append_log(f"{title_id}: сборка и проверка успешно завершены.")
+                self._append_log(self._t("build_success_log", title=title_id))
             else:
-                error_text = build_error_text(payload, title_id, exit_code)
+                error_text = build_error_text(
+                    payload, title_id, exit_code, self.language
+                )
                 self.build_results[title_id] = {
                     "status": "cancelled" if self.cancel_requested else "failed",
                     "exit_code": exit_code,
                     "error": error_text,
                 }
-                self._append_log(f"{title_id}: ошибка — {error_text}")
+                self._append_log(
+                    self._t("build_error_log", title=title_id, error=error_text)
+                )
+            self._set_build_progress(0)
             self._start_next_build()
         self._update_controls()
 
     def _process_error(self, error: QProcess.ProcessError) -> None:
         if error == QProcess.ProcessError.Crashed and self.cancel_requested:
-            self._append_log("Операция отменена пользователем; временные данные можно продолжить позже.")
+            self._append_log(self._t("cancelled_log"))
             return
-        self._append_log(f"Ошибка процесса: {self.process.errorString()}")
+        self._append_log(
+            self._t("process_error", error=self.process.errorString())
+        )
 
     def _finish_scan(self, payload: Any) -> None:
         inventory_path = scan_inventory_path(payload, self.temp_dir)
         try:
             self.inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
-            self._show_error("Не удалось прочитать инвентарь", str(error))
+            self._finish_progress(False)
+            self._set_stage("read_results_error")
+            self._show_error(self._t("inventory_read_error"), str(error))
             return
         self._populate_inventory()
         summary = inventory_summary(self.inventory)
-        self.stage_label.setText("Сканирование завершено")
+        self._finish_progress(True)
+        self._set_stage("scan_complete")
         self._append_log(
-            "Найдено: "
-            f"PKG {summary['packages']}, игр {summary['games']}, "
-            f"готово к сборке {summary['buildable']}, "
-            f"неподдерживаемых {summary['unsupported']}."
+            self._t(
+                "found_log",
+                packages=summary["packages"],
+                games=summary["games"],
+                buildable=summary["buildable"],
+                unsupported=summary["unsupported"],
+            )
         )
 
     def _populate_inventory(self) -> None:
@@ -744,13 +1400,16 @@ class MainWindow(QMainWindow):
             if not buildable:
                 top.setFlags(top.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
                 top.setForeground(2, QColor("#e58b95"))
-                reason = game_block_reason(game)
+                reason = game_block_reason(game, self.language)
                 top.setToolTip(2, reason)
                 top.setText(2, f"{top.text(2)}  —  {reason}")
             else:
                 top.setToolTip(
                     2,
-                    "Будут применены патчи: " + (", ".join(patches) if patches else "нет"),
+                    self._t(
+                        "patches_tooltip",
+                        patches=", ".join(patches) if patches else self._t("none"),
+                    ),
                 )
             self.games_tree.addTopLevelItem(top)
 
@@ -777,7 +1436,7 @@ class MainWindow(QMainWindow):
                         child.setForeground(2, QColor("#c6a15b"))
                         child.setToolTip(
                             2,
-                            f"Дубликат: {package['duplicate_of']}",
+                            self._t("duplicate", path=package["duplicate_of"]),
                         )
                     top.addChild(child)
             top.setExpanded(True)
@@ -785,7 +1444,14 @@ class MainWindow(QMainWindow):
         unsupported = self.inventory.get("unsupported", [])
         if unsupported:
             blocked = QTreeWidgetItem(
-                ["", "UNSUPPORTED", f"Неподдерживаемые или зашифрованные PKG: {len(unsupported)}", "", "", ""]
+                [
+                    "",
+                    "UNSUPPORTED",
+                    self._t("unsupported", count=len(unsupported)),
+                    "",
+                    "",
+                    "",
+                ]
             )
             blocked.setForeground(2, QColor("#e58b95"))
             self.games_tree.addTopLevelItem(blocked)
@@ -798,9 +1464,11 @@ class MainWindow(QMainWindow):
             blocked.setExpanded(True)
 
         summary = inventory_summary(self.inventory)
-        self.summary_label.setText(
-            f"Игр: {summary['games']} · к сборке: {summary['buildable']} · "
-            f"неподдерживаемых: {summary['unsupported']}"
+        self._set_summary(
+            "inventory_summary",
+            games=summary["games"],
+            buildable=summary["buildable"],
+            unsupported=summary["unsupported"],
         )
         self.games_tree.blockSignals(False)
         self._update_controls()
@@ -812,28 +1480,34 @@ class MainWindow(QMainWindow):
             if result.get("status") in {"failed", "cancelled"}
         ]
         succeeded = len(self.build_results) - len(failed)
-        self.progress.setRange(0, 100)
-        self.progress.setValue(100 if succeeded else 0)
+        self._finish_progress(not self.cancel_requested)
         if self.cancel_requested:
-            self.stage_label.setText("Отменено")
+            self._set_stage("cancelled")
         elif failed:
-            self.stage_label.setText("Завершено с ошибками")
+            self._set_stage("completed_errors")
             details = "\n".join(
-                f"{title_id}: {self.build_results[title_id].get('error', 'неизвестная ошибка')}"
+                f"{title_id}: "
+                f"{self.build_results[title_id].get('error', self._t('unknown_error'))}"
                 for title_id in failed
             )
             self._show_error(
-                "Не все образы собраны",
-                f"Успешно: {succeeded}.\n\n{details}",
+                self._t("not_all_built"),
+                self._t("success_count", count=succeeded, details=details),
             )
         else:
-            self.stage_label.setText("Все выбранные образы готовы")
+            self._set_stage("all_ready")
             QMessageBox.information(
                 self,
-                "Сборка завершена",
-                f"Успешно собрано и проверено: {succeeded}.\n\n{self.output_dir}",
+                self._t("build_complete_title"),
+                self._t(
+                    "build_complete_message",
+                    count=succeeded,
+                    path=self.output_dir,
+                ),
             )
         self.build_queue = []
+        self.current_build_title = None
+        self.current_build_stage = 0
         self._update_controls()
 
     def _cancel(self) -> None:
@@ -841,8 +1515,8 @@ class MainWindow(QMainWindow):
             return
         self.cancel_requested = True
         self.build_queue = []
-        self.stage_label.setText("Отмена…")
-        self._append_log("Запрошена отмена. Процесс будет остановлен безопасно.")
+        self._set_stage("cancelling")
+        self._append_log(self._t("cancel_requested"))
         self.process.terminate()
         QTimer.singleShot(
             3000,
@@ -869,7 +1543,9 @@ class MainWindow(QMainWindow):
         self.scan_button.setEnabled(has_source and not running)
         has_checked = self._has_checked_game()
         self.build_button.setText(
-            "Собрать выбранные" if has_checked else "Проверить готовность"
+            self._t("build_selected")
+            if has_checked
+            else self._t("check_readiness")
         )
         self.build_button.setEnabled(
             bool(self.inventory) and bool(self.output_dir) and not running
@@ -904,13 +1580,10 @@ class MainWindow(QMainWindow):
     def _show_about(self) -> None:
         QMessageBox.about(
             self,
-            f"О программе {APP_NAME}",
+            self._t("about_title", app=APP_NAME),
             (
                 f"<b>{APP_NAME} {APP_VERSION}</b><br><br>"
-                "GUI для локального конвейера PS4 PKG → FFPFSC. "
-                "Поддерживаются только законно полученные PKG, которые может "
-                "прочитать приложенный shadPS4 0.7.0. Исходные файлы не изменяются.<br><br>"
-                "Готовый образ создаётся MkPFS и проходит автоматическую проверку."
+                + self._t("about_body")
             ),
         )
 
@@ -918,8 +1591,8 @@ class MainWindow(QMainWindow):
         if self.process.state() != QProcess.ProcessState.NotRunning:
             answer = QMessageBox.question(
                 self,
-                "Операция выполняется",
-                "Остановить текущую операцию и закрыть программу?",
+                self._t("operation_running"),
+                self._t("close_running"),
             )
             if answer != QMessageBox.StandardButton.Yes:
                 event.ignore()

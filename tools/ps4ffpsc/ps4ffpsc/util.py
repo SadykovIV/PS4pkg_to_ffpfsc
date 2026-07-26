@@ -9,7 +9,7 @@ import stat
 import unicodedata
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 TITLE_ID_RE = re.compile(r"^CUSA\d{5}$")
 VERSION_RE = re.compile(r"^\d+(?:\.\d+)*$")
@@ -21,11 +21,22 @@ def utc_now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
-def sha256_file(path: Path, chunk_size: int = 4 * 1024 * 1024) -> str:
+def sha256_file(
+    path: Path,
+    chunk_size: int = 4 * 1024 * 1024,
+    progress: Callable[[int, int], None] | None = None,
+) -> str:
     digest = hashlib.sha256()
+    total = path.stat().st_size
+    processed = 0
+    if progress:
+        progress(0, total)
     with path.open("rb") as stream:
         while chunk := stream.read(chunk_size):
             digest.update(chunk)
+            processed += len(chunk)
+            if progress:
+                progress(processed, total)
     return digest.hexdigest()
 
 
@@ -126,9 +137,9 @@ def tree_manifest(root: Path) -> list[dict[str, Any]]:
     return result
 
 
-def tree_sha256(root: Path) -> str:
+def tree_sha256_from_manifest(manifest: Iterable[dict[str, Any]]) -> str:
     digest = hashlib.sha256()
-    for entry in tree_manifest(root):
+    for entry in manifest:
         digest.update(entry["path"].encode("utf-8"))
         digest.update(b"\0")
         digest.update(str(entry["size"]).encode("ascii"))
@@ -136,6 +147,10 @@ def tree_sha256(root: Path) -> str:
         digest.update(entry["sha256"].encode("ascii"))
         digest.update(b"\n")
     return digest.hexdigest()
+
+
+def tree_sha256(root: Path) -> str:
+    return tree_sha256_from_manifest(tree_manifest(root))
 
 
 def safe_remove_tree(path: Path, allowed_parent: Path) -> None:
@@ -154,3 +169,37 @@ def copy_file_atomic(source: Path, destination: Path) -> None:
     partial = destination.with_name(f"{destination.name}.partial")
     shutil.copy2(source, partial, follow_symlinks=False)
     os.replace(partial, destination)
+
+
+def stage_file_atomic(
+    source: Path,
+    destination: Path,
+    *,
+    consume_source: bool = False,
+) -> str:
+    """Stage a file atomically using link, move, then copy as available."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    partial = destination.with_name(f"{destination.name}.partial")
+    if partial.exists():
+        partial.unlink()
+    try:
+        os.link(source, partial, follow_symlinks=False)
+        mode = "linked"
+    except OSError:
+        if consume_source:
+            try:
+                os.replace(source, partial)
+                mode = "moved"
+            except OSError:
+                shutil.copy2(source, partial, follow_symlinks=False)
+                mode = "copied"
+        else:
+            shutil.copy2(source, partial, follow_symlinks=False)
+            mode = "copied"
+    os.replace(partial, destination)
+    return mode
+
+
+def link_or_copy_file_atomic(source: Path, destination: Path) -> bool:
+    """Atomically hardlink a file, falling back to a portable copy."""
+    return stage_file_atomic(source, destination) == "linked"

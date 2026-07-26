@@ -34,6 +34,8 @@ The ZIP, checksum, and release notes are written to `release/`.
 TITLE_ID, exposes buildable/conflicted states, supports selecting multiple
 games, streams the operation log, remains responsive during conversion, and
 supports cancellation/resume. Source PKGs are never modified.
+The **Русский / English** selector in the header switches the complete GUI
+localization immediately and remembers the selected language.
 
 The Windows x64 release is reproducibly built and smoke-tested by
 `.github/workflows/build-windows-x64.yml` on a native Windows runner. The
@@ -49,6 +51,11 @@ available and displays this exact reason.
 Extracted PKGs, merge trees and MkPFS scratch files are stored under
 `PS4 FFPFSC` inside the temporary directory selected in the GUI (`%TEMP%` on
 Windows or `/tmp` on macOS by default), not under `Application Support`.
+The merge uses same-volume hardlinks when available, with an automatic copy
+fallback. Extracted package trees are discarded after a verified merge, and the
+per-game temporary workspace is removed after a fully successful build. Failed
+or cancelled builds keep verified resumable state. Source PKGs and completed
+artifacts are never removed.
 
 `ps4ffpsc` converts legally owned, shadPS4-supported PS4 PKGs into verified
 ShadowMountPlus `.ffpfsc` artifacts:

@@ -15,6 +15,10 @@ GUI and command-line path do not have separate conversion implementations.
 Switching modes clears the previous inventory. The source PKGs remain in place
 and are opened read-only by the extractor.
 
+The header language selector switches the complete interface between Russian
+and English without restarting the application. The selection is persisted for
+the next launch.
+
 The scan path intentionally avoids reading every byte of every package. It
 reads package headers/metadata and records a cheap path/size/mtime scan identity.
 The worker computes and records the full SHA-256 only after the user starts a
@@ -37,13 +41,24 @@ enabled as **Check readiness** / **Проверить готовность**. It
 block reason. In particular, a large patch with `CATEGORY=gp` is still a patch;
 base `CATEGORY=gd` is required before it can be built with its DLC.
 
-The progress bar is indeterminate while a worker process is active. Detailed
-stage messages are streamed to the journal. Builds run one TITLE_ID at a time,
-and the GUI continues with the next selected game if one build fails.
+The progress area shows the overall percentage for all selected games, the
+current stage and substage, exact elapsed time, and an estimated remaining time.
+PKG hashing/extraction and MkPFS compression/verification stream structured
+progress to the GUI. Before enough work has completed for a useful estimate,
+the remaining-time field explicitly says that it is still being calculated.
+Builds run one TITLE_ID at a time, and the GUI continues with the next selected
+game if one build fails.
 
 **Cancel** first requests a graceful process termination and then forces it
 after three seconds. A later run can reuse verified extraction state when
 **Resume interrupted work** is enabled.
+
+The merge prefers same-filesystem hardlinks over full copies and falls back
+automatically on filesystems that do not support them. Extracted package trees
+are removed after the merged tree is verified. A successful build removes its
+entire per-game temporary workspace; a failed or cancelled build keeps the
+verified state required for resume. Neither cleanup path changes source PKGs or
+completed output artifacts.
 
 ## Launch and packaging
 

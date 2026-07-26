@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,14 +25,17 @@ from .util import (
     read_json,
     safe_remove_tree,
     sha256_file,
+    stage_file_atomic,
     tree_manifest,
     tree_sha256,
+    tree_sha256_from_manifest,
     utc_now,
     validate_title_id,
     version_key,
 )
 
 LOG = logging.getLogger("ps4ffpsc")
+PROGRESS_PREFIX = "PS4FFPSC_PROGRESS "
 
 
 @dataclass
@@ -127,6 +131,40 @@ def configure_logging(settings: Settings, title_id: str | None = None) -> None:
         handlers=handlers,
         force=True,
     )
+
+
+def _gui_progress_enabled() -> bool:
+    return os.environ.get("PS4FFPSC_GUI_PROGRESS") == "1"
+
+
+def _emit_gui_progress(scope: str, **payload: Any) -> None:
+    if not _gui_progress_enabled():
+        return
+    message = {"scope": scope, **payload}
+    print(
+        PROGRESS_PREFIX + json.dumps(message, ensure_ascii=False, separators=(",", ":")),
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _sha256_with_progress(path: Path, scope: str, **payload: Any) -> str:
+    last_percent = -1
+
+    def report(current: int, total: int) -> None:
+        nonlocal last_percent
+        percent = 100 if total == 0 else int(current * 100 / total)
+        if percent < 100 and percent < last_percent + 1:
+            return
+        last_percent = percent
+        _emit_gui_progress(
+            scope,
+            current=current,
+            total=max(total, 1),
+            **payload,
+        )
+
+    return sha256_file(path, progress=report if _gui_progress_enabled() else None)
 
 
 def extractor_or_raise(settings: Settings) -> Path:
@@ -244,12 +282,19 @@ def unpack_game(settings: Settings, inventory: dict[str, Any], title_id: str) ->
         for item in [*game["base"], *game["patches"], *game["dlc"]]
         if item.get("supported") and not item.get("duplicate_of")
     ]
-    for package in candidates:
+    candidate_total = len(candidates)
+    for package_index, package in enumerate(candidates, start=1):
         if package.get("sha256"):
             continue
         source = Path(package["path"])
         LOG.info("computing source SHA-256 before extraction: %s", source)
-        package["sha256"] = sha256_file(source)
+        package["sha256"] = _sha256_with_progress(
+            source,
+            "source_hash",
+            package_index=package_index,
+            package_total=candidate_total,
+            package_name=source.name,
+        )
         package["sha256_verified"] = True
     selected = _deduplicate_packages_by_sha(candidates)
     check_disk_space(settings.temp_dir, _disk_required(selected, 1.25))
@@ -257,7 +302,8 @@ def unpack_game(settings: Settings, inventory: dict[str, Any], title_id: str) ->
     state = _load_state(root)
     results: list[dict[str, Any]] = []
 
-    for package in selected:
+    selected_total = len(selected)
+    for package_index, package in enumerate(selected, start=1):
         destination = package_destination(root, package)
         package["extracted_path"] = str(destination)
         saved = state["packages"].get(package["sha256"])
@@ -271,6 +317,12 @@ def unpack_game(settings: Settings, inventory: dict[str, Any], title_id: str) ->
             results.append(saved)
             LOG.info("resume: verified package already extracted: %s", package["path"])
             continue
+        if settings.resume and saved and destination.exists():
+            LOG.warning(
+                "resume: extracted package failed verification and will be recreated: %s",
+                destination,
+            )
+            safe_remove_tree(destination, root)
         if destination.exists() and not settings.force:
             raise FileExistsError(f"extraction destination exists; use --force: {destination}")
         partial = destination.with_name(f"{destination.name}.partial")
@@ -291,7 +343,34 @@ def unpack_game(settings: Settings, inventory: dict[str, Any], title_id: str) ->
             "--json-progress",
         ]
         LOG.info("extracting %s -> %s", package["path"], partial)
-        process = subprocess.run(command, check=False, capture_output=True, text=True, encoding="utf-8")
+
+        def extraction_progress(line: str) -> None:
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                return
+            if not isinstance(event, dict) or event.get("event") not in {
+                "extract_start",
+                "extract_progress",
+                "extract_complete",
+            }:
+                return
+            current = int(event.get("current", event.get("files", 0)) or 0)
+            total = int(event.get("total", event.get("files", 0)) or 0)
+            _emit_gui_progress(
+                "extract",
+                current=current,
+                total=max(total, 1),
+                package_index=package_index,
+                package_total=selected_total,
+                package_name=Path(package["path"]).name,
+            )
+
+        process = _run_captured(
+            command,
+            stdout_line_callback=extraction_progress,
+            forward_stderr=True,
+        )
         if process.returncode != 0:
             state["packages"][package["sha256"]] = {
                 "status": "unsupported_or_encrypted_pkg"
@@ -309,7 +388,7 @@ def unpack_game(settings: Settings, inventory: dict[str, Any], title_id: str) ->
                 f"{process.stdout.strip() or process.stderr.strip()}"
             )
         manifest = tree_manifest(partial)
-        digest = tree_sha256(partial)
+        digest = tree_sha256_from_manifest(manifest)
         os.replace(partial, destination)
         record = {
             "status": "verified",
@@ -382,8 +461,13 @@ def _copy_overlay(
     package: dict[str, Any],
     changes: list[dict[str, Any]],
     case_map: dict[str, tuple[str, str]],
-) -> None:
-    for relative, source_file in sorted(iter_tree_files(source), key=lambda item: item[0].as_posix()):
+) -> dict[str, int]:
+    linked = 0
+    moved = 0
+    copied = 0
+    for relative, source_file in sorted(
+        iter_tree_files(source), key=lambda item: item[0].as_posix()
+    ):
         rel_text = relative.as_posix()
         if any(part == ".DS_Store" or part.startswith("._") for part in relative.parts):
             LOG.warning("ignoring macOS host metadata in extracted tree: %s", source_file)
@@ -408,13 +492,21 @@ def _copy_overlay(
         case_map[folded] = (package_identity, rel_text)
         target = destination / relative
         ensure_within(destination, target)
-        previous_hash = sha256_file(target) if target.exists() else None
-        new_hash = sha256_file(source_file)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        partial = target.with_name(f"{target.name}.partial")
-        shutil.copy2(source_file, partial, follow_symlinks=False)
-        os.replace(partial, target)
-        if package.get("kind") != "base" and (
+        records_change = package.get("kind") != "base"
+        previous_hash = (
+            sha256_file(target) if records_change and target.exists() else None
+        )
+        new_hash = sha256_file(source_file) if records_change else None
+        staging_mode = stage_file_atomic(
+            source_file, target, consume_source=True
+        )
+        if staging_mode == "linked":
+            linked += 1
+        elif staging_mode == "moved":
+            moved += 1
+        else:
+            copied += 1
+        if records_change and (
             previous_hash != new_hash or case_renamed_from is not None
         ):
             change = {
@@ -427,6 +519,7 @@ def _copy_overlay(
             if case_renamed_from is not None:
                 change["case_renamed_from"] = case_renamed_from
             changes.append(change)
+    return {"linked": linked, "moved": moved, "copied": copied}
 
 
 def merge_game(
@@ -466,9 +559,50 @@ def merge_game(
     partial.mkdir(parents=True)
     changes: list[dict[str, Any]] = []
     case_map: dict[str, tuple[str, str]] = {}
-    _copy_overlay(package_destination(root, base[0]), partial, base[0], changes, case_map)
+    overlay_packages = [base[0], *patches, *dlc]
+    overlay_total = len(overlay_packages)
+    overlay_index = 0
+    copy_stats = {"linked": 0, "moved": 0, "copied": 0}
+
+    def merge_package(
+        source: Path,
+        target: Path,
+        package: dict[str, Any],
+        target_changes: list[dict[str, Any]],
+        target_case_map: dict[str, tuple[str, str]],
+    ) -> None:
+        nonlocal overlay_index
+        stats = _copy_overlay(
+            source, target, package, target_changes, target_case_map
+        )
+        copy_stats["linked"] += stats["linked"]
+        copy_stats["moved"] += stats["moved"]
+        copy_stats["copied"] += stats["copied"]
+        overlay_index += 1
+        _emit_gui_progress(
+            "merge_package",
+            current=overlay_index,
+            total=max(overlay_total, 1),
+            linked=copy_stats["linked"],
+            moved=copy_stats["moved"],
+            copied=copy_stats["copied"],
+        )
+
+    merge_package(
+        package_destination(root, base[0]),
+        partial,
+        base[0],
+        changes,
+        case_map,
+    )
     for patch in patches:
-        _copy_overlay(package_destination(root, patch), partial, patch, changes, case_map)
+        merge_package(
+            package_destination(root, patch),
+            partial,
+            patch,
+            changes,
+            case_map,
+        )
 
     eboot = partial / "eboot.bin"
     param_sfo = partial / "sce_sys" / "param.sfo"
@@ -511,7 +645,7 @@ def merge_game(
         target = addcont_partial / label
         target.mkdir(parents=True)
         dlc_changes: list[dict[str, Any]] = []
-        _copy_overlay(source, target, item, dlc_changes, {})
+        merge_package(source, target, item, dlc_changes, {})
         metadata = {
             "title_id": title_id,
             "content_id": item.get("content_id"),
@@ -538,6 +672,9 @@ def merge_game(
         ],
         "latest_app_version": expected_version,
         "overlay_changes": changes,
+        "staging_hardlinks": copy_stats["linked"],
+        "staging_moves": copy_stats["moved"],
+        "staging_copies": copy_stats["copied"],
         "tombstones_applied": False,
         "tombstone_reason": "No explicit deletion metadata was identified in shadPS4 0.7.0 extraction.",
         "delta_patch_warning": any("DELTA_PATCH" in item.get("pkg_flags", []) for item in patches),
@@ -577,6 +714,75 @@ def merge_game(
     return report
 
 
+def _resume_merged_game(
+    settings: Settings,
+    game: dict[str, Any],
+    title_id: str,
+) -> dict[str, Any] | None:
+    if not settings.resume or settings.force:
+        return None
+    root = game_root(settings, game)
+    app = root / "merged" / "app"
+    manifest_path = root / "manifest.json"
+    report_path = root / "reports" / "merge_report.json"
+    if not app.is_dir() or not manifest_path.is_file() or not report_path.is_file():
+        return None
+    try:
+        manifest = read_json(manifest_path)
+        report = read_json(report_path)
+        if (
+            report.get("title_id") != title_id
+            or report.get("compatibility") != settings.compat
+        ):
+            return None
+        saved_packages = {
+            str(Path(item["path"]).resolve()): item
+            for item in manifest.get("packages", [])
+            if item.get("path") and item.get("sha256")
+        }
+        current_packages = [
+            item
+            for item in [*game["base"], *game["patches"], *game["dlc"]]
+            if item.get("supported") and not item.get("duplicate_of")
+        ]
+        for package_index, package in enumerate(current_packages, start=1):
+            source = Path(package["path"]).resolve()
+            saved = saved_packages.get(str(source))
+            if saved is None:
+                return None
+            current_sha = _sha256_with_progress(
+                source,
+                "source_hash",
+                package_index=package_index,
+                package_total=max(len(current_packages), 1),
+                package_name=source.name,
+            )
+            if current_sha != saved["sha256"]:
+                return None
+            package["sha256"] = current_sha
+            package["sha256_verified"] = True
+        if tree_sha256(app) != report.get("merged_tree_sha256"):
+            return None
+        values = parse_sfo(app / "sce_sys" / "param.sfo")
+        if values.get("TITLE_ID") != title_id:
+            return None
+        if settings.compat == "current-smp":
+            validate_shadowmount_param_json(
+                (app / "sce_sys" / "param.json").read_bytes(), title_id
+            )
+    except (KeyError, OSError, TypeError, ValueError):
+        return None
+    LOG.info("resume: verified merged workspace reused: %s", app)
+    return report
+
+
+def _discard_extracted_packages(root: Path) -> None:
+    packages = root / "packages"
+    if packages.exists():
+        safe_remove_tree(packages, root)
+        LOG.info("removed extracted package trees after verified merge: %s", packages)
+
+
 def _utf8_subprocess_environment() -> dict[str, str]:
     environment = os.environ.copy()
     environment["PYTHONUTF8"] = "1"
@@ -608,15 +814,77 @@ def mkpfs_command(settings: Settings) -> list[str]:
     raise RuntimeError("official MkPFS is not installed; run scripts/bootstrap_macos.sh")
 
 
-def _run_logged(command: list[str], log_path: Path) -> subprocess.CompletedProcess[str]:
-    LOG.info("running: %s", " ".join(json.dumps(part) for part in command))
-    process = subprocess.run(
+def _run_captured(
+    command: list[str],
+    *,
+    stdout_line_callback: Any = None,
+    forward_stderr: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    if not _gui_progress_enabled():
+        return subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            env=_utf8_subprocess_environment(),
+        )
+
+    process = subprocess.Popen(
         command,
-        check=False,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         encoding="utf-8",
+        errors="replace",
         env=_utf8_subprocess_environment(),
+        bufsize=1,
+    )
+    stdout_chunks: list[str] = []
+    stderr_chunks: list[str] = []
+
+    def drain_stdout() -> None:
+        assert process.stdout is not None
+        for line in process.stdout:
+            stdout_chunks.append(line)
+            if stdout_line_callback is not None:
+                try:
+                    stdout_line_callback(line)
+                except Exception as error:
+                    LOG.debug("progress callback failed: %s", error)
+
+    def drain_stderr() -> None:
+        assert process.stderr is not None
+        for line in process.stderr:
+            stderr_chunks.append(line)
+            if forward_stderr:
+                try:
+                    if sys.stderr is not None:
+                        sys.stderr.write(line)
+                        sys.stderr.flush()
+                except OSError:
+                    pass
+
+    stdout_thread = threading.Thread(target=drain_stdout, daemon=True)
+    stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
+    stdout_thread.start()
+    stderr_thread.start()
+    return_code = process.wait()
+    stdout_thread.join()
+    stderr_thread.join()
+    return subprocess.CompletedProcess(
+        command,
+        return_code,
+        "".join(stdout_chunks),
+        "".join(stderr_chunks),
+    )
+
+
+def _run_logged(command: list[str], log_path: Path) -> subprocess.CompletedProcess[str]:
+    LOG.info("running: %s", " ".join(json.dumps(part) for part in command))
+    process = _run_captured(
+        command,
+        forward_stderr=True,
     )
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as stream:
@@ -760,22 +1028,48 @@ def build_game(
     game = game_or_raise(inventory, title_id)
     if not game["buildable"]:
         raise RuntimeError(f"{title_id} skipped: {game['conflicts'] or game['warnings']}")
-    LOG.info("stage 1/4: extracting selected packages")
-    unpack_game(settings, inventory, title_id)
-    # Rebuilding after unpack can reuse an existing valid merge only with --force.
-    LOG.info("stage 2/4: merging base and ordered patches")
-    merge_report = merge_game(settings, inventory, title_id, settings.compat)
-    if settings.dry_run:
-        return merge_report
     root = game_root(settings, game)
-    app = root / "merged" / "app"
-    version = merge_report["latest_app_version"]
+    patches = sorted(
+        (item for item in game["patches"] if not item.get("duplicate_of")),
+        key=lambda item: version_key(item["app_version"]),
+    )
+    base = [item for item in game["base"] if not item.get("duplicate_of")]
+    version = (
+        patches[-1]["app_version"]
+        if patches
+        else base[0].get("app_version", "01.00")
+    )
     filename = f"{game['directory_name']} [v{version}].ffpfsc"
-    settings.output_dir.mkdir(parents=True, exist_ok=True)
     output = settings.output_dir / filename
     partial = output.with_name(f"{output.name}.partial")
+    root_resolved = root.resolve(strict=False)
+    output_resolved = output.resolve(strict=False)
+    if output_resolved == root_resolved or root_resolved in output_resolved.parents:
+        raise ValueError(
+            "output directory must not be inside the temporary game workspace"
+        )
+    settings.output_dir.mkdir(parents=True, exist_ok=True)
     if output.exists() and not settings.force:
         raise FileExistsError(f"output exists; use --force: {output}")
+
+    LOG.info("stage 1/5: validating sources and extracting selected packages")
+    merge_report = _resume_merged_game(settings, game, title_id)
+    if merge_report is None:
+        stale_merge = root / "merged"
+        if settings.resume and not settings.force and stale_merge.exists():
+            safe_remove_tree(stale_merge, root)
+            LOG.warning("discarded an invalid resumable merge: %s", stale_merge)
+        unpack_game(settings, inventory, title_id)
+        LOG.info("stage 2/5: merging base and ordered patches")
+        merge_report = merge_game(settings, inventory, title_id, settings.compat)
+        if not settings.dry_run:
+            _discard_extracted_packages(root)
+    else:
+        LOG.info("stage 2/5: reusing verified merged app")
+    if settings.dry_run:
+        return merge_report
+    app = root / "merged" / "app"
+    version = merge_report["latest_app_version"]
     if partial.exists():
         partial.unlink()
     check_disk_space(settings.temp_dir, _disk_required([*game["base"], *game["patches"]], 2.2))
@@ -839,20 +1133,21 @@ def build_game(
         if settings.compat == "current-smp":
             command.append("--require-game-files")
         command += [str(app), str(partial)]
-    LOG.info("stage 3/4: creating compressed FFPFSC image")
+    LOG.info("stage 3/5: creating compressed FFPFSC image")
     _run_logged(command, log_path)
-    LOG.info("stage 4/4: verifying nested image and required files")
+    LOG.info("stage 4/5: verifying nested image and required files")
     verification = _verify_image(settings, partial, app, settings.compat)
     if output.exists():
         output.unlink()
     os.replace(partial, output)
-    digest = sha256_file(output)
-    output.with_name(f"{output.name}.sha256").write_text(
-        f"{digest}  {output.name}\n", encoding="utf-8"
-    )
     dlc_artifacts: list[dict[str, Any]] = []
     if settings.include_dlc == "separate" and game["dlc"]:
         dlc_artifacts = _pack_dlc_separate(settings, game, root / "merged", mkpfs, log_path)
+    LOG.info("stage 5/5: checksumming output and cleaning temporary files")
+    digest = _sha256_with_progress(output, "artifact_hash")
+    output.with_name(f"{output.name}.sha256").write_text(
+        f"{digest}  {output.name}\n", encoding="utf-8"
+    )
     artifact_manifest = {
         "schema_version": 1,
         "artifact": str(output),
@@ -889,10 +1184,11 @@ def build_game(
             if dlc_artifacts
             else "Bundle mode requires a companion ShadowMountPlus implementation and was not emitted."
             if game["dlc"] and settings.include_dlc == "bundle"
-            else "DLC remains prepared under merged/addcont; runtime support is unverified."
+            else "DLC was prepared during the verified merge; temporary staging was removed."
             if game["dlc"]
             else "No DLC packages found."
         ),
+        "temporary_workspace_cleaned": False,
         "completed_at": utc_now(),
     }
     manifest_path = output.with_suffix(".manifest.json")
@@ -923,12 +1219,18 @@ def build_game(
                 "static_shadowmount_compatible="
                 + str(settings.compat == "current-smp").lower(),
                 "ps5_runtime_verified=false",
-                "DLC runtime support is not verified; DLC remains under unpacked/merged/addcont.",
+                "DLC runtime support is not verified; temporary DLC staging is removed after success.",
                 "",
             ]
         ),
         encoding="utf-8",
     )
+    _emit_gui_progress("cleanup", current=0, total=1)
+    safe_remove_tree(root, settings.unpacked_dir)
+    artifact_manifest["temporary_workspace_cleaned"] = True
+    atomic_write_json(manifest_path, artifact_manifest)
+    _emit_gui_progress("cleanup", current=1, total=1)
+    LOG.info("temporary game workspace removed after successful build: %s", root)
     LOG.info("build completed: %s", output)
     return artifact_manifest
 

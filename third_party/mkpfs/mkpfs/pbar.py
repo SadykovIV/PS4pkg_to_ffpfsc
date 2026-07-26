@@ -5,6 +5,8 @@ This module provides the Progress class used by CLI build flows.
 
 from __future__ import annotations
 
+import json
+import os
 import sys
 import time
 
@@ -17,6 +19,7 @@ from typing import Any, Callable
 from .utils import human_readable_size
 
 default_listener: ContextVar[Callable[..., Any] | None] = ContextVar("default_listener", default=None)
+PROGRESS_PREFIX = "PS4FFPSC_PROGRESS "
 
 
 class Progress:
@@ -68,6 +71,25 @@ class Progress:
 
         if not self.enabled:
             return
+
+        if os.environ.get("PS4FFPSC_GUI_PROGRESS") == "1":
+            sys.stderr.write(
+                PROGRESS_PREFIX
+                + json.dumps(
+                    {
+                        "scope": "mkpfs",
+                        "phase": phase,
+                        "current": done,
+                        "total": total,
+                        "bytes_processed": bytes_processed,
+                    },
+                    separators=(",", ":"),
+                )
+                + "\n"
+            )
+            sys.stderr.flush()
+            return
+
         # Suppress \r-delimited terminal writes when a GUI listener is active
         # so the log pane doesn't accumulate incremental progress lines.
         if self.listener:
@@ -132,6 +154,18 @@ class Progress:
             self.listener("status", message)
 
         if not self.enabled:
+            return
+
+        if os.environ.get("PS4FFPSC_GUI_PROGRESS") == "1":
+            sys.stderr.write(
+                PROGRESS_PREFIX
+                + json.dumps(
+                    {"scope": "mkpfs", "action": "status", "message": message},
+                    separators=(",", ":"),
+                )
+                + "\n"
+            )
+            sys.stderr.flush()
             return
 
         # Suppress terminal write when a GUI listener is active so the log

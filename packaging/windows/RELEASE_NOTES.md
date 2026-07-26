@@ -14,6 +14,15 @@ Homebrew или других приложений не требуется.
 - Пути и имена с кириллицей корректно обрабатываются worker и MkPFS в Windows.
 - GUI читает созданный inventory по пути, который вернул worker; сканирование
   больше не обращается к старому каталогу `AppData\Local\PS4 FFPFSC\unpacked`.
+- Индикатор показывает общий процент, текущий подэтап, прошедшее время и
+  расчётное время до завершения; извлечение и MkPFS передают живой прогресс.
+- Объединение использует hardlinks с автоматическим fallback на копирование,
+  не хеширует распакованное дерево дважды и удаляет уже ненужные распакованные
+  PKG после проверенного merge.
+- После полностью успешной сборки временный каталог игры удаляется
+  автоматически. При ошибке или отмене данные для продолжения сохраняются.
+- Добавлена полная английская локализация GUI и переключатель
+  **Русский / English** с сохранением выбора.
 
 ### Использование
 
@@ -53,6 +62,14 @@ applications are not required.
 - The worker and MkPFS now handle Cyrillic paths and names correctly on Windows.
 - The GUI reads the inventory path reported by the worker instead of looking in
   the obsolete `AppData\Local\PS4 FFPFSC\unpacked` directory.
+- The progress area shows overall percentage, current substage, elapsed time and
+  estimated time remaining, with live extraction and MkPFS updates.
+- Merge staging uses hardlinks with an automatic copy fallback, avoids hashing
+  an extracted tree twice, and discards extracted PKG trees after verification.
+- A fully successful build automatically removes its per-game temporary
+  workspace. Failed or cancelled builds keep resumable state.
+- Full English GUI localization and a persistent **Русский / English** language
+  selector were added.
 
 ## Usage
 

@@ -14,6 +14,16 @@ Python, исходный репозиторий или внешние прило
   `~/Library/Application Support/PS4 FFPFSC`.
 - GUI читает созданный inventory по пути, который вернул worker, и не обращается
   к старому каталогу `Application Support/PS4 FFPFSC/unpacked`.
+- Индикатор показывает общий процент, текущий подэтап, прошедшее время и
+  расчётное время до завершения; прогресс извлечения и MkPFS обновляется во
+  время работы.
+- Объединение использует hardlinks с автоматическим fallback на копирование,
+  не хеширует распакованное дерево дважды и удаляет уже ненужные распакованные
+  PKG после проверенного merge.
+- После полностью успешной сборки временный каталог игры удаляется
+  автоматически. При ошибке или отмене данные для продолжения сохраняются.
+- Добавлена полная английская локализация GUI и переключатель
+  **Русский / English** с сохранением выбора.
 
 ### Исправления 0.2.1
 
@@ -65,6 +75,14 @@ not required on the destination Mac.
   `~/Library/Application Support/PS4 FFPFSC`.
 - The GUI reads the inventory path reported by the worker instead of looking in
   the obsolete `Application Support/PS4 FFPFSC/unpacked` directory.
+- The progress area shows overall percentage, current substage, elapsed time and
+  estimated time remaining, with live extraction and MkPFS updates.
+- Merge staging uses hardlinks with an automatic copy fallback, avoids hashing
+  an extracted tree twice, and discards extracted PKG trees after verification.
+- A fully successful build automatically removes its per-game temporary
+  workspace. Failed or cancelled builds keep resumable state.
+- Full English GUI localization and a persistent **Русский / English** language
+  selector were added.
 
 ## Fixes in 0.2.1
 

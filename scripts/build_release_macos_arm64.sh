@@ -20,6 +20,8 @@ fi
 rm -rf "${BUILD_ROOT}" "${RELEASE_ROOT}"
 mkdir -p "${BUILD_ROOT}" "${RELEASE_ROOT}"
 
+"${PROJECT_ROOT}/.venv/bin/python" -m pytest -q
+
 cmake -S "${PROJECT_ROOT}" -B "${BUILD_ROOT}/helper" \
   -DCMAKE_BUILD_TYPE=Release \
   -DPS4FFPSC_STATIC_CRYPTOPP=ON
