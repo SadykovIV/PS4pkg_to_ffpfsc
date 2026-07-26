@@ -45,11 +45,17 @@ from .runtime import (
     ensure_application_directories,
     is_frozen,
     resource_root,
+    worker_executable,
 )
 
 
 APP_NAME = "PS4 FFPFSC"
 APP_VERSION = "0.2.1"
+CREATE_NO_WINDOW = 0x08000000
+
+
+def _hide_windows_worker_console(arguments: Any) -> None:
+    arguments.flags |= CREATE_NO_WINDOW
 
 
 class MainWindow(QMainWindow):
@@ -64,6 +70,12 @@ class MainWindow(QMainWindow):
         self.process.readyReadStandardError.connect(self._read_stderr)
         self.process.finished.connect(self._process_finished)
         self.process.errorOccurred.connect(self._process_error)
+        if sys.platform == "win32" and hasattr(
+            self.process, "setCreateProcessArgumentsModifier"
+        ):
+            self.process.setCreateProcessArgumentsModifier(
+                _hide_windows_worker_console
+            )
 
         self.source_mode = "folder"
         self.pkg_files: tuple[Path, ...] = ()
@@ -337,7 +349,7 @@ class MainWindow(QMainWindow):
     def _restore_settings(self) -> None:
         output = self.settings.value("output_dir", str(self.root / "output"), type=str)
         self.output_dir = Path(output).expanduser()
-        temp = self.settings.value("temp_dir", "/tmp", type=str)
+        temp = self.settings.value("temp_dir", tempfile.gettempdir(), type=str)
         self.temp_dir = Path(temp).expanduser()
         folder = self.settings.value("source_folder", "", type=str)
         if folder and Path(folder).is_dir():
@@ -413,7 +425,11 @@ class MainWindow(QMainWindow):
         self._update_controls()
 
     def _choose_temp(self) -> None:
-        start = str(self.temp_dir if self.temp_dir.is_dir() else Path("/tmp"))
+        start = str(
+            self.temp_dir
+            if self.temp_dir.is_dir()
+            else Path(tempfile.gettempdir())
+        )
         name = QFileDialog.getExistingDirectory(
             self,
             "Папка для временных файлов",
@@ -427,7 +443,7 @@ class MainWindow(QMainWindow):
         self._save_settings()
 
     def _reset_temp(self) -> None:
-        self.temp_dir = Path("/tmp")
+        self.temp_dir = Path(tempfile.gettempdir())
         self._update_storage_labels()
         self._save_settings()
 
@@ -567,7 +583,10 @@ class MainWindow(QMainWindow):
         if self.process.state() != QProcess.ProcessState.NotRunning:
             return
         if is_frozen():
-            program = Path(sys.executable)
+            program = worker_executable()
+            if not program.is_file():
+                self._show_error("Не найден рабочий модуль", str(program))
+                return
             process_arguments = ["--worker", *arguments]
         else:
             program = self.resources / ".venv" / "bin" / "python"

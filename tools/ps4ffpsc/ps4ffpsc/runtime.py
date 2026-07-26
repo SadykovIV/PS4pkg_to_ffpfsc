@@ -32,7 +32,18 @@ def application_data_root() -> Path:
         return Path(override).expanduser().resolve()
     if is_frozen() and sys.platform == "darwin":
         return (Path.home() / "Library" / "Application Support" / APP_SUPPORT_NAME).resolve()
+    if is_frozen() and sys.platform == "win32":
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        parent = Path(local_app_data) if local_app_data else Path.home() / "AppData" / "Local"
+        return (parent / APP_SUPPORT_NAME).resolve()
     return source_project_root()
+
+
+def worker_executable() -> Path:
+    executable = Path(sys.executable)
+    if is_frozen() and sys.platform == "win32":
+        return executable.with_name("ps4ffpsc-worker.exe")
+    return executable
 
 
 def ensure_application_directories(root: Path) -> None:

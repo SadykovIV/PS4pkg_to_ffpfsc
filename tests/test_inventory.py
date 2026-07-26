@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from ps4ffpsc import inventory as inventory_module
-from ps4ffpsc.inventory import scan_packages
+from ps4ffpsc.inventory import find_extractor, scan_packages
 
 
 def _record(path: Path, sha: str, kind: str, title_id: str = "CUSA12345") -> dict:
@@ -25,6 +25,15 @@ def _record(path: Path, sha: str, kind: str, title_id: str = "CUSA12345") -> dic
         "size": 1024,
         "localized_titles": {},
     }
+
+
+def test_find_extractor_accepts_bundled_windows_executable(tmp_path: Path) -> None:
+    resources = tmp_path / "resources"
+    extractor = resources / "bin" / "ps4_pkg_extract.exe"
+    extractor.parent.mkdir(parents=True)
+    extractor.write_bytes(b"MZ")
+
+    assert find_extractor(tmp_path, resources) == extractor
 
 
 def test_duplicate_base_is_not_a_conflict(monkeypatch, tmp_path: Path) -> None:

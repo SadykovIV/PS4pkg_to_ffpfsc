@@ -22,15 +22,17 @@ LOG = logging.getLogger("ps4ffpsc")
 
 def find_extractor(root: Path, resources: Path | None = None) -> Path | None:
     resources = resources or root
-    candidates = [
-        resources / "bin" / "ps4_pkg_extract",
-        resources / "build" / "tools" / "ps4_pkg_extract" / "ps4_pkg_extract",
-        resources / "build" / "ps4_pkg_extract",
-        root / "build" / "tools" / "ps4_pkg_extract" / "ps4_pkg_extract",
-        root / "build" / "ps4_pkg_extract",
-        root / "tools" / "ps4_pkg_extract" / "build" / "ps4_pkg_extract",
+    names = ("ps4_pkg_extract.exe", "ps4_pkg_extract")
+    directories = [
+        resources / "bin",
+        resources / "build" / "tools" / "ps4_pkg_extract",
+        resources / "build",
+        root / "build" / "tools" / "ps4_pkg_extract",
+        root / "build",
+        root / "tools" / "ps4_pkg_extract" / "build",
     ]
-    return next((path for path in candidates if path.is_file() and path.stat().st_mode & 0o111), None)
+    candidates = [directory / name for directory in directories for name in names]
+    return next((path for path in candidates if path.is_file()), None)
 
 
 def inspect_package(

@@ -39,11 +39,19 @@ public:
 
     int Open(const std::filesystem::path& path, FileAccessMode mode) {
         Close();
+#ifdef _WIN32
+        const wchar_t* open_mode = mode == FileAccessMode::Read     ? L"rb"
+                                   : mode == FileAccessMode::Write  ? L"wb"
+                                   : mode == FileAccessMode::Append ? L"ab"
+                                                                    : L"r+b";
+        file_ = ::_wfopen(path.c_str(), open_mode);
+#else
         const char* open_mode = mode == FileAccessMode::Read     ? "rb"
                                 : mode == FileAccessMode::Write  ? "wb"
                                 : mode == FileAccessMode::Append ? "ab"
                                                                  : "r+b";
         file_ = std::fopen(path.c_str(), open_mode);
+#endif
         return file_ ? 0 : -1;
     }
     void Close() {
@@ -59,20 +67,30 @@ public:
         if (!file_) {
             return 0;
         }
-        const auto current = std::ftell(file_);
-        std::fseek(file_, 0, SEEK_END);
-        const auto end = std::ftell(file_);
-        std::fseek(file_, current, SEEK_SET);
+        const auto current = Tell();
+        if (current < 0 || !Seek(0, SeekOrigin::End)) {
+            return 0;
+        }
+        const auto end = Tell();
+        Seek(current, SeekOrigin::SetOrigin);
         return end < 0 ? 0 : static_cast<u64>(end);
     }
     bool Seek(s64 offset, SeekOrigin origin = SeekOrigin::SetOrigin) const {
         const int whence = origin == SeekOrigin::SetOrigin
                                ? SEEK_SET
                                : (origin == SeekOrigin::CurrentPosition ? SEEK_CUR : SEEK_END);
+#ifdef _WIN32
+        return file_ && ::_fseeki64(file_, offset, whence) == 0;
+#else
         return file_ && ::fseeko(file_, static_cast<off_t>(offset), whence) == 0;
+#endif
     }
     s64 Tell() const {
+#ifdef _WIN32
+        return file_ ? static_cast<s64>(::_ftelli64(file_)) : -1;
+#else
         return file_ ? static_cast<s64>(::ftello(file_)) : -1;
+#endif
     }
 
     template <typename T>

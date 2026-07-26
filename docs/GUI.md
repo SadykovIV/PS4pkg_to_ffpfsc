@@ -1,9 +1,9 @@
 # Desktop GUI
 
-`PS4 FFPFSC.app` is a self-contained macOS arm64 application implemented with
-PySide6 Essentials. It embeds Python, Qt, MkPFS and the native PKG helper, but
-calls the same `ps4ffpsc` worker used by automated tests, so the GUI and
-command-line path do not have separate conversion implementations.
+`PS4 FFPFSC` is a self-contained macOS arm64 and Windows x64 application
+implemented with PySide6 Essentials. It embeds Python, Qt, MkPFS and the native
+PKG helper, but calls the same `ps4ffpsc` worker used by automated tests, so the
+GUI and command-line path do not have separate conversion implementations.
 
 ## Input modes
 
@@ -24,8 +24,9 @@ build, immediately before extracting that package.
 
 1. Select PKG files or a source folder.
 2. Select the output folder.
-3. Keep `/tmp` for temporary files or choose a different directory/volume. The
-   GUI shows its currently available space and remembers the choice.
+3. Keep the system temporary directory (`%TEMP%` on Windows or `/tmp` on
+   macOS), or choose a different directory/volume. The GUI shows its currently
+   available space and remembers the choice.
 4. Scan. The tree groups BASE, PATCH and DLC packages by TITLE_ID and shows
    conflicts or unsupported packages without selecting them for a build.
 5. Keep or clear the check mark beside every buildable game.
@@ -45,6 +46,24 @@ after three seconds. A later run can reuse verified extraction state when
 **Resume interrupted work** is enabled.
 
 ## Launch and packaging
+
+Download and completely extract
+`PS4-FFPFSC-v0.2.1-windows-x64.zip`, then launch `PS4 FFPFSC.exe`. The
+accompanying `_internal` directory and `ps4ffpsc-worker.exe` are required parts
+of the self-contained application.
+
+To build the Windows archive on a native Windows x64 host with Python and
+vcpkg already available:
+
+```powershell
+.\scripts\build_release_windows_x64.ps1
+```
+
+The GitHub Actions workflow `.github/workflows/build-windows-x64.yml` provisions
+the remaining build dependencies, runs the test suite, builds the application,
+audits all bundled PE files as x64, and uploads the ZIP/checksum/notes artifact.
+
+For macOS arm64:
 
 ```bash
 ./scripts/bootstrap_macos.sh

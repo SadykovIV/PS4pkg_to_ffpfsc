@@ -2,15 +2,26 @@
 
 **Languages:** **English** · [Русский](README.md)
 
-## Desktop GUI
+> Self-contained GUI converter from supported PS4 PKGs to verified FFPFSC
+> images for ShadowMountPlus. Ready-made macOS arm64 and Windows x64 builds do
+> not require Python or external applications.
 
-The ready-made Apple Silicon release is self-contained: it does not require
-Homebrew, Python, Qt, MkPFS, or this repository on the destination Mac. Extract
-`PS4-FFPFSC-v0.2.1-macos-arm64.zip`, move `PS4 FFPFSC.app` to
-`/Applications`, then use **Control-click → Open** for the first launch of the
-current ad-hoc-signed build.
+## Ready-made desktop applications
 
-To reproduce the same release from source:
+Both release archives are self-contained and include Python, Qt, MkPFS and the
+native PKG helper:
+
+- **Windows x64:** extract
+  `PS4-FFPFSC-v0.2.1-windows-x64.zip` completely, then run
+  `PS4 FFPFSC.exe`. Keep the accompanying files in the extracted directory.
+  An unsigned build may require explicit approval in Microsoft Defender
+  SmartScreen on first launch.
+- **macOS arm64:** extract `PS4-FFPFSC-v0.2.1-macos-arm64.zip`, move
+  `PS4 FFPFSC.app` to `/Applications`, then use
+  **Control-click → Open** for the first launch of the current ad-hoc-signed
+  build.
+
+To reproduce the macOS release from source:
 
 ```bash
 ./scripts/bootstrap_macos.sh
@@ -23,6 +34,11 @@ The ZIP, checksum, and release notes are written to `release/`.
 TITLE_ID, exposes buildable/conflicted states, supports selecting multiple
 games, streams the operation log, remains responsive during conversion, and
 supports cancellation/resume. Source PKGs are never modified.
+
+The Windows x64 release is reproducibly built and smoke-tested by
+`.github/workflows/build-windows-x64.yml` on a native Windows runner. The
+workflow calls `scripts/build_release_windows_x64.ps1`; it verifies the frozen
+GUI, CLI worker, MkPFS, bundled PKG helper, and every PE binary architecture.
 
 Scanning reads only package headers and metadata. It neither copies each PKG nor
 hashes an entire multi-gigabyte file; the full SHA-256 is computed only when a
@@ -66,6 +82,6 @@ that JSON. `static_shadowmount_compatible=true` is a source-level result only.
 Every generated manifest remains `ps5_runtime_verified=false` until the artifact
 is actually tested on a PS5.
 
-See [README_RU.md](README_RU.md), [GUI guide](docs/GUI.md),
+See [Русский README](README.md), [GUI guide](docs/GUI.md),
 [architecture](docs/ARCHITECTURE.md), and
 [format compatibility](docs/FORMAT_COMPATIBILITY.md).

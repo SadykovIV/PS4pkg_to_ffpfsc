@@ -36,7 +36,8 @@ def main() -> int:
         window.show()
         QTimer.singleShot(250, app.quit)
         result = app.exec()
-        print("gui_smoke_ok")
+        if sys.stdout is not None:
+            print("gui_smoke_ok")
         return result
     from ps4ffpsc.gui import main as gui_main
 

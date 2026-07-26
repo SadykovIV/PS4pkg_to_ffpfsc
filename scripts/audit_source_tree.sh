@@ -17,12 +17,14 @@ done < <(
     -path "${SOURCE_ROOT}/.git" -prune -o \
     \( -type d \( \
       -name '.venv' -o -name '.pytest_cache' -o -name '__pycache__' -o \
-      -name 'build' -o -name 'build-release' -o -name 'dist' -o \
+      -name 'build' -o -name 'build-release' -o -name 'build-release-windows' -o \
+      -name 'dist' -o \
       -name 'release' -o -name 'logs' -o -name 'output' -o \
       -name 'unpacked' -o -name 'work' -o -name '*.app' \
     \) -o -type f \( \
       -iname '*.pkg' -o -iname '*.ffpfsc' -o -iname '*.dmg' -o \
-      -iname '*.zip' -o -iname '*.pyc' -o -iname '*.partial' \
+      -iname '*.zip' -o -iname '*.exe' -o -iname '*.dll' -o \
+      -iname '*.pyd' -o -iname '*.pyc' -o -iname '*.partial' \
     \) \) -print
 )
 

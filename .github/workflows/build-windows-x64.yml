@@ -1,0 +1,40 @@
+name: build-windows-x64
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: "x64"
+          cache: "pip"
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Install static C++ dependencies
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install `
+            cryptopp:x64-windows-static zlib:x64-windows-static
+      - name: Install Python build dependencies
+        run: python -m pip install -r requirements-dev.lock
+      - name: Run Python tests
+        run: pytest -q
+      - name: Build and smoke-test standalone Windows x64 release
+        shell: pwsh
+        run: ./scripts/build_release_windows_x64.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-release
+          path: release/*
+          if-no-files-found: error
+          retention-days: 7

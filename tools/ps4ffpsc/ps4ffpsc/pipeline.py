@@ -932,7 +932,10 @@ def doctor(settings: Settings) -> dict[str, Any]:
             "version": platform.python_version(),
             "executable": sys.executable,
         },
-        "architecture": {"ok": platform.machine() in {"arm64", "aarch64", "x86_64"}, "value": platform.machine()},
+        "architecture": {
+            "ok": platform.machine() in {"arm64", "aarch64", "x86_64", "AMD64"},
+            "value": platform.machine(),
+        },
         "compiler": {
             "ok": is_frozen() or bool(shutil.which("clang++") or shutil.which("g++")),
             "required": not is_frozen(),

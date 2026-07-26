@@ -9,7 +9,7 @@ find_package(ZLIB REQUIRED)
 find_path(CRYPTOPP_INCLUDE_DIR cryptopp/aes.h
   HINTS /opt/homebrew/include /usr/local/include)
 option(PS4FFPSC_STATIC_CRYPTOPP "Link Crypto++ statically for portable binaries" ON)
-if(PS4FFPSC_STATIC_CRYPTOPP)
+if(PS4FFPSC_STATIC_CRYPTOPP AND NOT WIN32)
   set(PS4FFPSC_SAVED_LIBRARY_SUFFIXES "${CMAKE_FIND_LIBRARY_SUFFIXES}")
   set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
   find_library(CRYPTOPP_LIBRARY NAMES cryptopp
@@ -40,5 +40,9 @@ target_link_libraries(ps4_pkg_extract PRIVATE ZLIB::ZLIB "${CRYPTOPP_LIBRARY}")
 
 set_target_properties(ps4_pkg_extract PROPERTIES
   POSITION_INDEPENDENT_CODE ON)
+if(MSVC AND PS4FFPSC_STATIC_CRYPTOPP)
+  set_property(TARGET ps4_pkg_extract PROPERTY
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
 
 add_test(NAME ps4_pkg_extract_help COMMAND ps4_pkg_extract --help)
