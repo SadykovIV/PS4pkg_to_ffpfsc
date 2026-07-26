@@ -1,0 +1,29 @@
+name: host-tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python:
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Crypto++ (macOS)
+        if: runner.os == 'macOS'
+        run: brew install cryptopp
+      - name: Install Crypto++ (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libcrypto++-dev
+      - run: python -m pip install -r requirements-dev.lock
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build --parallel 2
+      - run: ctest --test-dir build --output-on-failure
+      - run: pytest -q
+

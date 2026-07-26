@@ -1,0 +1,298 @@
+diff --git a/include/sm_gameinfo.h b/include/sm_gameinfo.h
+index 578942d..70ea803 100644
+--- a/include/sm_gameinfo.h
++++ b/include/sm_gameinfo.h
+@@ -4,10 +4,18 @@
+ #include <stdbool.h>
+ #include <sys/stat.h>
+ 
+-// Read title ID and title name from a mounted game directory.
++typedef enum {
++  SM_METADATA_PARAM_JSON = 0,
++  SM_METADATA_PARAM_SFO = 1,
++} sm_metadata_kind_t;
++
++// Read title ID and title name from a mounted PS5/PS4 game directory.
+ bool get_game_info(const char *base_path, const struct stat *param_st,
++                   sm_metadata_kind_t metadata_kind,
+                    char *out_id, char *out_name);
+-// Check whether a directory contains sce_sys/param.json and stat it.
+-bool directory_has_param_json(const char *dir_path, struct stat *param_st_out);
++// Prefer sce_sys/param.json and fall back to a regular sce_sys/param.sfo.
++bool directory_has_game_metadata(const char *dir_path,
++                                 struct stat *param_st_out,
++                                 sm_metadata_kind_t *metadata_kind_out);
+ 
+ #endif
+diff --git a/src/sm_filesystem.c b/src/sm_filesystem.c
+index f3c1f4b..44e2130 100644
+--- a/src/sm_filesystem.c
++++ b/src/sm_filesystem.c
+@@ -21,13 +21,20 @@ bool has_appmeta_data(const char *title_id) {
+   char path[MAX_PATH];
+   snprintf(path, sizeof(path), "%s/%s/param.json", APPMETA_BASE, title_id);
+   struct stat st;
+-  return (stat(path, &st) == 0 && S_ISREG(st.st_mode));
++  if (stat(path, &st) == 0 && S_ISREG(st.st_mode))
++    return true;
++  snprintf(path, sizeof(path), "%s/%s/param.sfo", APPMETA_BASE, title_id);
++  return stat(path, &st) == 0 && S_ISREG(st.st_mode);
+ }
+ 
+ bool is_data_mounted(const char *title_id) {
+   char path[MAX_PATH];
+   snprintf(path, sizeof(path), "/system_ex/app/%s/sce_sys/param.json",
+            title_id);
++  if (path_exists(path))
++    return true;
++  snprintf(path, sizeof(path), "/system_ex/app/%s/sce_sys/param.sfo",
++           title_id);
+   return path_exists(path);
+ }
+ 
+diff --git a/src/sm_gameinfo.c b/src/sm_gameinfo.c
+index 94e0145..d800f0f 100644
+--- a/src/sm_gameinfo.c
++++ b/src/sm_gameinfo.c
+@@ -4,6 +4,80 @@
+ #include "sm_path_state.h"
+ 
+ // --- Game Metadata Parsing (param.json) ---
++static uint16_t read_le16(const uint8_t *p) {
++  return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
++}
++
++static uint32_t read_le32(const uint8_t *p) {
++  return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
++         ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
++}
++
++static bool range_inside(size_t offset, size_t length, size_t total) {
++  return offset <= total && length <= total - offset;
++}
++
++static bool copy_sfo_text(const uint8_t *buf, size_t len,
++                          uint32_t key_table, uint32_t data_table,
++                          const uint8_t *entry, const char *wanted,
++                          char *out, size_t out_size) {
++  uint16_t key_rel = read_le16(entry);
++  uint16_t format = read_le16(entry + 2);
++  uint32_t value_len = read_le32(entry + 4);
++  uint32_t value_rel = read_le32(entry + 12);
++  size_t key_pos = (size_t)key_table + key_rel;
++  size_t value_pos = (size_t)data_table + value_rel;
++  if (format != 0x0204 || key_pos >= data_table ||
++      !range_inside(value_pos, value_len, len) || value_len == 0)
++    return false;
++  size_t key_room = (size_t)data_table - key_pos;
++  if (!memchr(buf + key_pos, '\0', key_room) ||
++      strcmp((const char *)(buf + key_pos), wanted) != 0 ||
++      buf[value_pos + value_len - 1] != '\0')
++    return false;
++  size_t copy_len = strnlen((const char *)(buf + value_pos), value_len);
++  if (copy_len >= out_size)
++    copy_len = out_size - 1;
++  memcpy(out, buf + value_pos, copy_len);
++  out[copy_len] = '\0';
++  return true;
++}
++
++static bool parse_param_sfo(const uint8_t *buf, size_t len,
++                            char *out_id, char *out_name) {
++  if (len < 20 || memcmp(buf, "\0PSF", 4) != 0)
++    return false;
++  uint32_t key_table = read_le32(buf + 8);
++  uint32_t data_table = read_le32(buf + 12);
++  uint32_t count = read_le32(buf + 16);
++  size_t index_end = 20u + (size_t)count * 16u;
++  if (count > 4096 || index_end < 20 ||
++      index_end > key_table || key_table > data_table || data_table > len)
++    return false;
++
++  const uint8_t *entries = buf + 20;
++  for (uint32_t i = 0; i < count; ++i)
++    (void)copy_sfo_text(buf, len, key_table, data_table, entries + i * 16,
++                        "TITLE_ID", out_id, MAX_TITLE_ID);
++  for (uint32_t i = 0; i < count; ++i)
++    (void)copy_sfo_text(buf, len, key_table, data_table, entries + i * 16,
++                        "TITLE", out_name, MAX_TITLE_NAME);
++  if (out_name[0] == '\0') {
++    char key[16];
++    for (int language = 0; language < 30 && out_name[0] == '\0'; ++language) {
++      snprintf(key, sizeof(key), "TITLE_%02d", language);
++      for (uint32_t i = 0; i < count; ++i)
++        (void)copy_sfo_text(buf, len, key_table, data_table, entries + i * 16,
++                            key, out_name, MAX_TITLE_NAME);
++    }
++  }
++  if (out_id[0] == '\0')
++    return false;
++  if (out_name[0] == '\0')
++    (void)strlcpy(out_name, out_id, MAX_TITLE_NAME);
++  return true;
++}
++
+ static int extract_json_string(const char *json, const char *key, char *out,
+                                size_t out_size) {
+   char search[64];
+@@ -31,6 +105,7 @@ static int extract_json_string(const char *json, const char *key, char *out,
+ }
+ 
+ bool get_game_info(const char *base_path, const struct stat *param_st,
++                   sm_metadata_kind_t metadata_kind,
+                    char *out_id, char *out_name) {
+   out_id[0] = '\0';
+   out_name[0] = '\0';
+@@ -47,8 +122,10 @@ bool get_game_info(const char *base_path, const struct stat *param_st,
+   }
+ 
+   char path[MAX_PATH];
+-  int written = snprintf(path, sizeof(path), "%s/sce_sys/param.json",
+-                         base_path);
++  const char *metadata_name =
++      metadata_kind == SM_METADATA_PARAM_SFO ? "param.sfo" : "param.json";
++  int written = snprintf(path, sizeof(path), "%s/sce_sys/%s",
++                         base_path, metadata_name);
+   if (written < 0 || (size_t)written >= sizeof(path)) {
+     store_cached_game_info(base_path, param_st, false, "", "");
+     return false;
+@@ -74,18 +151,22 @@ bool get_game_info(const char *base_path, const struct stat *param_st,
+   buf[len] = '\0';
+ 
+   bool valid = false;
+-  int res = extract_json_string(buf, "titleId", out_id, MAX_TITLE_ID);
+-  if (res != 0)
+-    res = extract_json_string(buf, "title_id", out_id, MAX_TITLE_ID);
+-  if (res == 0) {
+-    const char *en_ptr = strstr(buf, "\"en-US\"");
+-    const char *search_start = en_ptr ? en_ptr : buf;
+-    if (extract_json_string(search_start, "titleName", out_name,
+-                            MAX_TITLE_NAME) != 0)
+-      extract_json_string(buf, "titleName", out_name, MAX_TITLE_NAME);
+-    if (out_name[0] == '\0')
+-      (void)strlcpy(out_name, out_id, MAX_TITLE_NAME);
+-    valid = true;
++  if (metadata_kind == SM_METADATA_PARAM_SFO) {
++    valid = parse_param_sfo((const uint8_t *)buf, len, out_id, out_name);
++  } else {
++    int res = extract_json_string(buf, "titleId", out_id, MAX_TITLE_ID);
++    if (res != 0)
++      res = extract_json_string(buf, "title_id", out_id, MAX_TITLE_ID);
++    if (res == 0) {
++      const char *en_ptr = strstr(buf, "\"en-US\"");
++      const char *search_start = en_ptr ? en_ptr : buf;
++      if (extract_json_string(search_start, "titleName", out_name,
++                              MAX_TITLE_NAME) != 0)
++        extract_json_string(buf, "titleName", out_name, MAX_TITLE_NAME);
++      if (out_name[0] == '\0')
++        (void)strlcpy(out_name, out_id, MAX_TITLE_NAME);
++      valid = true;
++    }
+   }
+   free(buf);
+ 
+@@ -93,19 +174,34 @@ bool get_game_info(const char *base_path, const struct stat *param_st,
+   return valid;
+ }
+ 
+-bool directory_has_param_json(const char *dir_path, struct stat *param_st_out) {
++bool directory_has_game_metadata(const char *dir_path,
++                                 struct stat *param_st_out,
++                                 sm_metadata_kind_t *metadata_kind_out) {
+   int dir_fd = open(dir_path, O_RDONLY | O_DIRECTORY);
+   if (dir_fd < 0)
+     return false;
+ 
+   struct stat st;
+-  if (fstatat(dir_fd, "sce_sys", &st, 0) == 0 && S_ISDIR(st.st_mode) &&
+-      fstatat(dir_fd, "sce_sys/param.json", &st, 0) == 0 &&
+-      S_ISREG(st.st_mode)) {
+-    if (param_st_out)
+-      *param_st_out = st;
+-    close(dir_fd);
+-    return true;
++  if (fstatat(dir_fd, "sce_sys", &st, AT_SYMLINK_NOFOLLOW) == 0 &&
++      S_ISDIR(st.st_mode)) {
++    if (fstatat(dir_fd, "sce_sys/param.json", &st, AT_SYMLINK_NOFOLLOW) == 0 &&
++        S_ISREG(st.st_mode)) {
++      if (param_st_out)
++        *param_st_out = st;
++      if (metadata_kind_out)
++        *metadata_kind_out = SM_METADATA_PARAM_JSON;
++      close(dir_fd);
++      return true;
++    }
++    if (fstatat(dir_fd, "sce_sys/param.sfo", &st, AT_SYMLINK_NOFOLLOW) == 0 &&
++        S_ISREG(st.st_mode)) {
++      if (param_st_out)
++        *param_st_out = st;
++      if (metadata_kind_out)
++        *metadata_kind_out = SM_METADATA_PARAM_SFO;
++      close(dir_fd);
++      return true;
++    }
+   }
+ 
+   close(dir_fd);
+diff --git a/src/sm_install.c b/src/sm_install.c
+index dd8da14..9c9405e 100644
+--- a/src/sm_install.c
++++ b/src/sm_install.c
+@@ -178,6 +178,8 @@ static bool update_trophy_metadata(const char *title_id,
+     ok = false;
+   if (!copy_optional_trophy_metadata_file(src_sce_sys, dst_base, "param.json"))
+     ok = false;
++  if (!copy_optional_trophy_metadata_file(src_sce_sys, dst_base, "param.sfo"))
++    ok = false;
+ 
+   return ok;
+ }
+diff --git a/src/sm_scan.c b/src/sm_scan.c
+index 8a9e3d5..c93b2bb 100644
+--- a/src/sm_scan.c
++++ b/src/sm_scan.c
+@@ -155,6 +155,7 @@ static directory_candidate_probe_t probe_directory_candidate(
+     int *discovered_param_root_count, bool allow_known_param_root,
+     directory_candidate_info_t *info_out) {
+   struct stat param_st;
++  sm_metadata_kind_t metadata_kind;
+ 
+   if (is_pfsc_image_mount_base_or_child(full_path))
+     return DIRECTORY_CANDIDATE_DESCEND;
+@@ -170,7 +171,7 @@ static directory_candidate_probe_t probe_directory_candidate(
+     return DIRECTORY_CANDIDATE_SKIP_DESCEND;
+   }
+ 
+-  if (!directory_has_param_json(full_path, &param_st)) {
++  if (!directory_has_game_metadata(full_path, &param_st, &metadata_kind)) {
+     if (is_missing_param_scan_limited(full_path)) {
+       log_debug("  [SKIP] param.json retry limit reached: %s", full_path);
+     } else {
+@@ -179,7 +180,7 @@ static directory_candidate_probe_t probe_directory_candidate(
+     return DIRECTORY_CANDIDATE_DESCEND;
+   }
+ 
+-  if (!get_game_info(full_path, &param_st, info_out->title_id,
++  if (!get_game_info(full_path, &param_st, metadata_kind, info_out->title_id,
+                      info_out->title_name)) {
+     record_missing_param_failure(full_path);
+     log_debug("  [SKIP] game info unavailable: %s", full_path);
+@@ -495,7 +496,7 @@ static void collect_scan_candidates_from_manual_root(
+   bool try_root_candidate = !pfsc_container_root;
+   if (try_root_candidate && is_under_image_mount_base(scan_path)) {
+     struct stat param_st;
+-    try_root_candidate = directory_has_param_json(scan_path, &param_st);
++    try_root_candidate = directory_has_game_metadata(scan_path, &param_st, NULL);
+   }
+ 
+   if (try_root_candidate) {
+@@ -559,7 +560,8 @@ static void collect_scan_candidates_from_manual_path(
+   }
+ 
+   struct stat param_st;
+-  if (!S_ISDIR(st.st_mode) || !directory_has_param_json(manual_path, &param_st)) {
++  if (!S_ISDIR(st.st_mode) ||
++      !directory_has_game_metadata(manual_path, &param_st, NULL)) {
+     log_debug("  [MANUAL] expected game directory or image file: %s",
+               manual_path);
+     return;

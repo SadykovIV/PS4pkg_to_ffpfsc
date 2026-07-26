@@ -1,0 +1,156 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import shutil
+import stat
+import unicodedata
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, Iterable
+
+TITLE_ID_RE = re.compile(r"^CUSA\d{5}$")
+VERSION_RE = re.compile(r"^\d+(?:\.\d+)*$")
+ENTITLEMENT_RE = re.compile(r"^[A-Z0-9_]{16}$")
+INVALID_COMPONENT_RE = re.compile(r'[/\\:*?"<>|\x00-\x1f\x7f]')
+
+
+def utc_now() -> str:
+    return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def sha256_file(path: Path, chunk_size: int = 4 * 1024 * 1024) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(chunk_size):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def sanitize_component(value: str, fallback: str, max_chars: int = 120) -> str:
+    normalized = unicodedata.normalize("NFC", value)
+    normalized = INVALID_COMPONENT_RE.sub("_", normalized).rstrip(" .")
+    if normalized in {"", ".", ".."}:
+        normalized = fallback
+    if len(normalized) > max_chars:
+        suffix = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:8]
+        normalized = f"{normalized[: max_chars - 9]}-{suffix}"
+    return normalized
+
+
+def version_key(value: str) -> tuple[int, ...]:
+    if not VERSION_RE.fullmatch(value):
+        raise ValueError(f"invalid numeric version: {value!r}")
+    return tuple(int(component) for component in value.split("."))
+
+
+def validate_title_id(value: str) -> bool:
+    return bool(TITLE_ID_RE.fullmatch(value))
+
+
+def content_id_parts(value: str) -> tuple[str, str, str] | None:
+    parts = value.split("-")
+    if len(parts) != 3:
+        return None
+    region, title_part, label = parts
+    if not region or not title_part or not ENTITLEMENT_RE.fullmatch(label):
+        return None
+    return region, title_part, label
+
+
+def entitlement_label(value: str) -> str | None:
+    parts = content_id_parts(value)
+    return parts[2] if parts else None
+
+
+def atomic_write_json(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    partial = path.with_name(f"{path.name}.partial")
+    with partial.open("w", encoding="utf-8", newline="\n") as stream:
+        json.dump(value, stream, ensure_ascii=False, sort_keys=True, indent=2)
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(partial, path)
+
+
+def read_json(path: Path) -> Any:
+    with path.open("r", encoding="utf-8") as stream:
+        return json.load(stream)
+
+
+def ensure_within(root: Path, candidate: Path) -> Path:
+    root_resolved = root.resolve()
+    candidate_resolved = candidate.resolve(strict=False)
+    if candidate_resolved != root_resolved and root_resolved not in candidate_resolved.parents:
+        raise ValueError(f"path escapes destination: {candidate}")
+    return candidate_resolved
+
+
+def iter_tree_files(root: Path) -> Iterable[tuple[Path, Path]]:
+    if root.is_symlink():
+        raise ValueError(f"symlink tree root is forbidden: {root}")
+    for directory, dirnames, filenames in os.walk(root, followlinks=False):
+        directory_path = Path(directory)
+        for name in list(dirnames):
+            child = directory_path / name
+            if child.is_symlink():
+                raise ValueError(f"directory symlink is forbidden: {child}")
+        for name in filenames:
+            path = directory_path / name
+            mode = path.lstat().st_mode
+            if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+                raise ValueError(f"non-regular extracted entry is forbidden: {path}")
+            relative = path.relative_to(root)
+            if relative.is_absolute() or ".." in relative.parts:
+                raise ValueError(f"unsafe relative path: {relative}")
+            ensure_within(root, path)
+            yield relative, path
+
+
+def tree_manifest(root: Path) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    casefolded: dict[str, str] = {}
+    for relative, path in sorted(iter_tree_files(root), key=lambda item: item[0].as_posix()):
+        if any(part == ".DS_Store" or part.startswith("._") for part in relative.parts):
+            continue
+        rel_text = relative.as_posix()
+        folded = unicodedata.normalize("NFC", rel_text).casefold()
+        previous = casefolded.get(folded)
+        if previous is not None and previous != rel_text:
+            raise ValueError(f"case-insensitive path collision: {previous!r} vs {rel_text!r}")
+        casefolded[folded] = rel_text
+        result.append({"path": rel_text, "size": path.stat().st_size, "sha256": sha256_file(path)})
+    return result
+
+
+def tree_sha256(root: Path) -> str:
+    digest = hashlib.sha256()
+    for entry in tree_manifest(root):
+        digest.update(entry["path"].encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(entry["size"]).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(entry["sha256"].encode("ascii"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def safe_remove_tree(path: Path, allowed_parent: Path) -> None:
+    ensure_within(allowed_parent, path)
+    if path == allowed_parent.resolve():
+        raise ValueError("refusing to remove the allowed parent itself")
+    if path.is_symlink():
+        path.unlink()
+    elif path.exists():
+        shutil.rmtree(path)
+
+
+def copy_file_atomic(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    ensure_within(destination.parents[len(destination.parents) - 1], destination)
+    partial = destination.with_name(f"{destination.name}.partial")
+    shutil.copy2(source, partial, follow_symlinks=False)
+    os.replace(partial, destination)

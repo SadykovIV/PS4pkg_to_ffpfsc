@@ -1,0 +1,8 @@
+# Runtime/build dependencies tested on macOS ARM64.
+# MkPFS 1.0.0 at audited upstream commit ce62fdc, vendored as source:
+-e ./third_party/mkpfs
+cryptography==49.0.0
+zlib-ng==1.0.0
+isal==1.8.0
+PySide6-Essentials==6.11.1
+shiboken6==6.11.1
