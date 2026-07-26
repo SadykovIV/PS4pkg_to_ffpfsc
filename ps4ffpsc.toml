@@ -1,0 +1,23 @@
+[paths]
+pkg = "pkg"
+unpacked = "unpacked"
+output = "output"
+work = "work"
+
+[extract]
+jobs = 2
+resume = true
+
+[merge]
+apply_all_patches = true
+
+[shadowmount]
+compatibility = "current-smp"
+include_dlc = "auto"
+
+[pack]
+format = "ffpfsc"
+inner_filesystem = "exfat"
+verify = true
+keep_inner_image = false
+

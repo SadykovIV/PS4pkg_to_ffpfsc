@@ -1,0 +1,18 @@
+[project]
+name = "mkpfs"
+version = "1.0.0"
+description = "Vendored MkPFS core used by PS4 FFPFSC"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+dependencies = [
+    "cryptography==49.0.0",
+    "zlib-ng==1.0.0",
+    "isal==1.8.0; platform_machine == 'arm64' or platform_machine == 'aarch64' or platform_machine == 'x86_64' or platform_machine == 'AMD64'",
+]
+
+[build-system]
+requires = ["hatchling<1.32"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["mkpfs"]
