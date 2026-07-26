@@ -119,8 +119,12 @@ if ($GuiProcess.ExitCode -ne 0) { throw "Frozen GUI smoke test failed." }
 $Archive = Join-Path $ReleaseRoot "PS4-FFPFSC-v$Version-windows-x64.zip"
 Compress-Archive -LiteralPath $AppPath -DestinationPath $Archive -CompressionLevel Optimal
 $Digest = (Get-FileHash $Archive -Algorithm SHA256).Hash.ToLowerInvariant()
-"$Digest  $([System.IO.Path]::GetFileName($Archive))" |
-    Set-Content "$Archive.sha256" -Encoding ascii
+$ChecksumLine = "$Digest  $([System.IO.Path]::GetFileName($Archive))`n"
+[System.IO.File]::WriteAllText(
+    "$Archive.sha256",
+    $ChecksumLine,
+    [System.Text.Encoding]::ASCII
+)
 Copy-Item (Join-Path $ProjectRoot "packaging\windows\RELEASE_NOTES.md") `
     (Join-Path $ReleaseRoot "RELEASE_NOTES-v$Version-windows-x64.md")
 
