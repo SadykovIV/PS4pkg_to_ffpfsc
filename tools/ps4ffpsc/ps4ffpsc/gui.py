@@ -38,6 +38,7 @@ from .gui_model import (
     game_block_reason,
     inventory_summary,
     package_version_text,
+    scan_inventory_path,
     source_cli_arguments,
     temporary_cli_arguments,
     validate_source,
@@ -663,7 +664,7 @@ class MainWindow(QMainWindow):
 
         if operation == "scan":
             if exit_code in (0, 3):
-                self._finish_scan()
+                self._finish_scan(payload)
             else:
                 self.stage_label.setText("Ошибка сканирования")
                 self._show_error(
@@ -692,8 +693,8 @@ class MainWindow(QMainWindow):
             return
         self._append_log(f"Ошибка процесса: {self.process.errorString()}")
 
-    def _finish_scan(self) -> None:
-        inventory_path = self.root / "unpacked" / "package_inventory.json"
+    def _finish_scan(self, payload: Any) -> None:
+        inventory_path = scan_inventory_path(payload, self.temp_dir)
         try:
             self.inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:

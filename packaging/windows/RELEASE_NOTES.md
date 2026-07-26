@@ -12,6 +12,8 @@ Homebrew или других приложений не требуется.
 - Распакованные PKG, рабочее дерево и MkPFS tmp теперь записываются в выбранную
   временную папку, а не в `Application Support`.
 - Пути и имена с кириллицей корректно обрабатываются worker и MkPFS в Windows.
+- GUI читает созданный inventory по пути, который вернул worker; сканирование
+  больше не обращается к старому каталогу `AppData\Local\PS4 FFPFSC\unpacked`.
 
 ### Использование
 
@@ -49,6 +51,8 @@ applications are not required.
 - Extracted PKGs, merge trees and MkPFS scratch data now use the selected
   temporary directory instead of `Application Support`.
 - The worker and MkPFS now handle Cyrillic paths and names correctly on Windows.
+- The GUI reads the inventory path reported by the worker instead of looking in
+  the obsolete `AppData\Local\PS4 FFPFSC\unpacked` directory.
 
 ## Usage
 

@@ -12,6 +12,8 @@ Python, исходный репозиторий или внешние прило
 - Распакованные PKG, рабочее дерево и MkPFS tmp теперь записываются в выбранную
   временную папку (`/tmp` по умолчанию), а не в
   `~/Library/Application Support/PS4 FFPFSC`.
+- GUI читает созданный inventory по пути, который вернул worker, и не обращается
+  к старому каталогу `Application Support/PS4 FFPFSC/unpacked`.
 
 ### Исправления 0.2.1
 
@@ -61,6 +63,8 @@ not required on the destination Mac.
 - Extracted PKGs, merge trees and MkPFS scratch data now use the selected
   temporary directory (`/tmp` by default), not
   `~/Library/Application Support/PS4 FFPFSC`.
+- The GUI reads the inventory path reported by the worker instead of looking in
+  the obsolete `Application Support/PS4 FFPFSC/unpacked` directory.
 
 ## Fixes in 0.2.1
 

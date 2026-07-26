@@ -71,6 +71,14 @@ def temporary_cli_arguments(temp_dir: str | Path) -> list[str]:
     ]
 
 
+def scan_inventory_path(payload: Any, temp_dir: str | Path) -> Path:
+    if isinstance(payload, dict):
+        reported = payload.get("inventory")
+        if isinstance(reported, str) and reported.strip():
+            return Path(reported)
+    return temporary_workspace(Path(temp_dir)) / "unpacked" / "package_inventory.json"
+
+
 def inventory_summary(inventory: dict[str, Any]) -> dict[str, int]:
     games = inventory.get("games", {})
     return {

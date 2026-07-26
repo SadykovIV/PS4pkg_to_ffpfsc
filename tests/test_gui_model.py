@@ -10,6 +10,7 @@ from ps4ffpsc.gui_model import (
     inventory_summary,
     normalize_pkg_files,
     package_version_text,
+    scan_inventory_path,
     source_cli_arguments,
     temporary_cli_arguments,
 )
@@ -54,6 +55,20 @@ def test_all_heavy_workspace_paths_use_selected_temp_directory(
         "--temp-dir",
         str(workspace / "tmp"),
     ]
+
+
+def test_scan_uses_inventory_path_reported_by_worker(tmp_path: Path) -> None:
+    reported = tmp_path / "worker" / "package_inventory.json"
+
+    assert scan_inventory_path({"inventory": str(reported)}, tmp_path) == reported
+
+
+def test_scan_inventory_fallback_uses_selected_temp_directory(
+    tmp_path: Path,
+) -> None:
+    assert scan_inventory_path(None, tmp_path) == (
+        tmp_path / "PS4 FFPFSC" / "unpacked" / "package_inventory.json"
+    )
 
 
 def test_invalid_selected_file_is_rejected(tmp_path: Path) -> None:
