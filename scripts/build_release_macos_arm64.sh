@@ -80,7 +80,7 @@ PS4FFPSC_DATA_ROOT="${SMOKE_ROOT}" QT_QPA_PLATFORM=offscreen \
 
 ARCHIVE="${RELEASE_ROOT}/PS4-FFPFSC-v${VERSION}-macos-arm64.zip"
 ditto -c -k --sequesterRsrc --keepParent "${APP_PATH}" "${ARCHIVE}"
-shasum -a 256 "${ARCHIVE}" > "${ARCHIVE}.sha256"
+(cd "${RELEASE_ROOT}" && shasum -a 256 "$(basename "${ARCHIVE}")" > "$(basename "${ARCHIVE}").sha256")
 cp "${PROJECT_ROOT}/packaging/macos/RELEASE_NOTES.md" \
   "${RELEASE_ROOT}/RELEASE_NOTES-v${VERSION}.md"
 
