@@ -1,6 +1,6 @@
 # ps4ffpsc
 
-**Языки / Languages:** **Русский** · [English](README.md)
+**Языки / Languages:** **Русский** · [English](README_EN.md)
 
 Самодостаточный GUI-конвертер поддерживаемых PS4 PKG в проверенные
 FFPFSC-образы для ShadowMountPlus. Готовая macOS arm64-версия не требует
