@@ -10,9 +10,11 @@ find_path(CRYPTOPP_INCLUDE_DIR cryptopp/aes.h
   HINTS /opt/homebrew/include /usr/local/include)
 option(PS4FFPSC_STATIC_CRYPTOPP "Link Crypto++ statically for portable binaries" ON)
 if(PS4FFPSC_STATIC_CRYPTOPP)
-  find_file(CRYPTOPP_STATIC_LIBRARY NAMES libcryptopp.a
+  set(PS4FFPSC_SAVED_LIBRARY_SUFFIXES "${CMAKE_FIND_LIBRARY_SUFFIXES}")
+  set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
+  find_library(CRYPTOPP_LIBRARY NAMES cryptopp
     HINTS /opt/homebrew/opt/cryptopp/lib /opt/homebrew/lib /usr/local/lib)
-  set(CRYPTOPP_LIBRARY "${CRYPTOPP_STATIC_LIBRARY}")
+  set(CMAKE_FIND_LIBRARY_SUFFIXES "${PS4FFPSC_SAVED_LIBRARY_SUFFIXES}")
 else()
   find_library(CRYPTOPP_LIBRARY NAMES cryptopp
     HINTS /opt/homebrew/lib /usr/local/lib)
