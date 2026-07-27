@@ -143,6 +143,34 @@ def format_duration(seconds: float) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
+def format_byte_size(size: int | float) -> str:
+    value = max(0.0, float(size))
+    units = ("B", "KiB", "MiB", "GiB", "TiB")
+    unit = units[0]
+    for candidate in units:
+        unit = candidate
+        if value < 1024.0 or candidate == units[-1]:
+            break
+        value /= 1024.0
+    if unit == "B":
+        return f"{int(value)} {unit}"
+    return f"{value:.1f} {unit}"
+
+
+def game_source_size(game: dict[str, Any]) -> int:
+    packages = [
+        *game.get("base", []),
+        *game.get("patches", []),
+        *game.get("dlc", []),
+        *game.get("unknown", []),
+    ]
+    return sum(
+        max(0, int(package.get("size", 0) or 0))
+        for package in packages
+        if package.get("supported", True) and not package.get("duplicate_of")
+    )
+
+
 def estimate_remaining_seconds(elapsed: float, percent: float) -> float | None:
     if elapsed < 0 or percent <= 0 or percent > 100:
         return None

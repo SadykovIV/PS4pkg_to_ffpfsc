@@ -232,6 +232,81 @@ def test_unpack_rejects_pkg_changed_after_fast_metadata_scan(tmp_path: Path) -> 
         pipeline.unpack_game(settings, inventory, "CUSA12345")
 
 
+def test_unpack_progress_is_weighted_by_source_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path)
+    base_source = tmp_path / "base.pkg"
+    patch_source = tmp_path / "patch.pkg"
+    base_source.write_bytes(b"b" * 10)
+    patch_source.write_bytes(b"p" * 30)
+    inventory = _inventory(base_source)
+    game = inventory["games"]["CUSA12345"]
+    patch = {
+        "kind": "patch",
+        "supported": True,
+        "app_version": "01.10",
+        "path": str(patch_source),
+        "size": patch_source.stat().st_size,
+    }
+    game["patches"] = [patch]
+    events: list[dict[str, object]] = []
+    monkeypatch.setattr(pipeline, "check_disk_space", lambda *_args: None)
+    monkeypatch.setattr(
+        pipeline, "extractor_or_raise", lambda *_args: tmp_path / "extractor"
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_emit_gui_progress",
+        lambda scope, **payload: events.append({"scope": scope, **payload}),
+    )
+
+    def fake_extract(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        destination = Path(command[command.index("--output") + 1])
+        destination.mkdir(parents=True)
+        (destination / "payload.bin").write_bytes(b"extracted")
+        callback = kwargs["stdout_line_callback"]
+        assert callable(callback)
+        callback(
+            '{"event":"extract_start","bytes_current":0,"bytes_total":200,'
+            '"files_current":0,"files_total":2}'
+        )
+        callback(
+            '{"event":"extract_progress","bytes_current":100,"bytes_total":200,'
+            '"files_current":1,"files_total":2}'
+        )
+        callback(
+            '{"event":"extract_complete","bytes_current":200,"bytes_total":200,'
+            '"files":2}'
+        )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(pipeline, "_run_captured", fake_extract)
+
+    pipeline.unpack_game(settings, inventory, "CUSA12345")
+
+    halfway = [
+        event
+        for event in events
+        if event.get("package_bytes_current") == 100
+    ]
+    assert [(event["package_index"], event["current"], event["total"]) for event in halfway] == [
+        (1, 5, 40),
+        (2, 25, 40),
+    ]
+    completed = [
+        event
+        for event in events
+        if event.get("package_bytes_current") == 200
+    ]
+    assert [(event["package_index"], event["current"], event["total"]) for event in completed] == [
+        (1, 10, 40),
+        (2, 40, 40),
+    ]
+
+
 def test_verified_merged_workspace_can_resume_without_extracted_packages(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -37,8 +37,10 @@ from PySide6.QtWidgets import (
 from .gui_model import (
     build_error_text,
     estimate_remaining_seconds,
+    format_byte_size,
     format_duration,
     game_block_reason,
+    game_source_size,
     inventory_summary,
     package_version_text,
     parse_progress_event,
@@ -59,7 +61,7 @@ from .runtime import (
 
 
 APP_NAME = "PS4 FFPFSC"
-APP_VERSION = "0.2.2"
+APP_VERSION = "0.2.3"
 CREATE_NO_WINDOW = 0x08000000
 BUILD_STAGE_START = {1: 2.0, 2: 30.0, 3: 55.0, 4: 88.0, 5: 96.0}
 BUILD_STAGE_KEYS = {
@@ -96,6 +98,7 @@ TEXTS = {
         "header_type": "TITLE_ID / тип",
         "header_name": "Название / файл",
         "header_version": "Версия",
+        "header_size": "Размер",
         "log": "Журнал",
         "clear_log": "Очистить журнал",
         "compatibility": "Совместимость:",
@@ -112,6 +115,7 @@ TEXTS = {
         "timing_idle": "Прошло 00:00 · осталось —",
         "timing_calculating": "Прошло 00:00 · осталось: рассчитывается…",
         "timing": "Прошло {elapsed} · осталось {remaining}",
+        "timing_stage": "Прошло {elapsed} · до конца распаковки {remaining}",
         "calculating": "рассчитывается…",
         "cancel": "Отменить",
         "reveal": "Открыть папку результата",
@@ -146,7 +150,7 @@ TEXTS = {
         "merge_pkg": "объединение PKG",
         "cleanup_temp": "очистка временных файлов",
         "stage_status": "{title} · этап {stage}/{total}: {action}",
-        "pkg_status": "{title} · этап 1/5: {action} {current}/{total} · {percent}%",
+        "pkg_status": "{title} · этап 1/5: {action} {current}/{total} · {percent}% · {done} / {size}",
         "merge_status": "{title} · этап 2/5: объединение PKG {current}/{total}",
         "phase_status": "{title} · этап {stage}/5: {action} · {percent}%",
         "cleanup_status": "{title} · этап 5/5: очистка временных файлов",
@@ -183,7 +187,9 @@ TEXTS = {
         "none": "нет",
         "duplicate": "Дубликат: {path}",
         "unsupported": "Неподдерживаемые или зашифрованные PKG: {count}",
-        "inventory_summary": "Игр: {games} · к сборке: {buildable} · неподдерживаемых: {unsupported}",
+        "inventory_summary": "Игр: {games} · к сборке: {buildable} · выбрано ≈ {selected_size} · неподдерживаемых: {unsupported}",
+        "approximate_size": "≈ {size}",
+        "size_tooltip": "Исходные PKG: {size} ({bytes} байт)",
         "cancelled": "Отменено",
         "completed_errors": "Завершено с ошибками",
         "unknown_error": "неизвестная ошибка",
@@ -217,6 +223,7 @@ TEXTS = {
         "header_type": "TITLE_ID / type",
         "header_name": "Title / file",
         "header_version": "Version",
+        "header_size": "Size",
         "log": "Log",
         "clear_log": "Clear log",
         "compatibility": "Compatibility:",
@@ -233,6 +240,7 @@ TEXTS = {
         "timing_idle": "Elapsed 00:00 · remaining —",
         "timing_calculating": "Elapsed 00:00 · remaining: calculating…",
         "timing": "Elapsed {elapsed} · remaining {remaining}",
+        "timing_stage": "Elapsed {elapsed} · extraction remaining {remaining}",
         "calculating": "calculating…",
         "cancel": "Cancel",
         "reveal": "Open output folder",
@@ -267,7 +275,7 @@ TEXTS = {
         "merge_pkg": "merge PKG",
         "cleanup_temp": "clean temporary files",
         "stage_status": "{title} · stage {stage}/{total}: {action}",
-        "pkg_status": "{title} · stage 1/5: {action} {current}/{total} · {percent}%",
+        "pkg_status": "{title} · stage 1/5: {action} {current}/{total} · {percent}% · {done} / {size}",
         "merge_status": "{title} · stage 2/5: merge PKG {current}/{total}",
         "phase_status": "{title} · stage {stage}/5: {action} · {percent}%",
         "cleanup_status": "{title} · stage 5/5: clean temporary files",
@@ -304,7 +312,9 @@ TEXTS = {
         "none": "none",
         "duplicate": "Duplicate: {path}",
         "unsupported": "Unsupported or encrypted PKGs: {count}",
-        "inventory_summary": "Games: {games} · buildable: {buildable} · unsupported: {unsupported}",
+        "inventory_summary": "Games: {games} · buildable: {buildable} · selected ≈ {selected_size} · unsupported: {unsupported}",
+        "approximate_size": "≈ {size}",
+        "size_tooltip": "Source PKGs: {size} ({bytes} bytes)",
         "cancelled": "Cancelled",
         "completed_errors": "Completed with errors",
         "unknown_error": "unknown error",
@@ -368,6 +378,11 @@ class MainWindow(QMainWindow):
         self.progress_kind: str | None = None
         self.progress_started_at: float | None = None
         self.progress_percent = 0.0
+        self.byte_progress_started_at: float | None = None
+        self.byte_progress_start = 0.0
+        self.byte_progress_current = 0.0
+        self.byte_progress_total = 0.0
+        self.byte_progress_title: str | None = None
         self.scan_total = 0
         self.scan_seen = 0
         self.progress_timer = QTimer(self)
@@ -439,6 +454,7 @@ class MainWindow(QMainWindow):
                 self._t("header_version"),
                 "Patch",
                 "DLC",
+                self._t("header_size"),
             ]
         )
         combo_text = {
@@ -598,7 +614,7 @@ class MainWindow(QMainWindow):
         games_layout.addLayout(games_header)
 
         self.games_tree = QTreeWidget()
-        self.games_tree.setColumnCount(6)
+        self.games_tree.setColumnCount(7)
         self.games_tree.setHeaderLabels(
             [
                 self._t("header_build"),
@@ -607,6 +623,7 @@ class MainWindow(QMainWindow):
                 self._t("header_version"),
                 "Patch",
                 "DLC",
+                self._t("header_size"),
             ]
         )
         self.games_tree.setRootIsDecorated(True)
@@ -622,6 +639,7 @@ class MainWindow(QMainWindow):
         header_view.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         header_view.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         header_view.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        header_view.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
         games_layout.addWidget(self.games_tree)
         splitter.addWidget(games_card)
 
@@ -944,6 +962,7 @@ class MainWindow(QMainWindow):
         self.progress_kind = kind
         self.progress_started_at = time.monotonic()
         self.progress_percent = 0.0
+        self._reset_byte_progress()
         self.scan_total = 0
         self.scan_seen = 0
         self.current_build_stage = 0
@@ -986,12 +1005,71 @@ class MainWindow(QMainWindow):
         self.progress_timer.stop()
         self.progress_started_at = None
         self.progress_kind = None
+        self._reset_byte_progress()
+
+    def _reset_byte_progress(self) -> None:
+        self.byte_progress_started_at = None
+        self.byte_progress_start = 0.0
+        self.byte_progress_current = 0.0
+        self.byte_progress_total = 0.0
+        self.byte_progress_title = None
+
+    def _record_byte_progress(self, event: dict[str, Any]) -> None:
+        try:
+            current = max(0.0, float(event.get("current", 0)))
+            total = max(0.0, float(event.get("total", 0)))
+        except (TypeError, ValueError):
+            return
+        if total <= 0:
+            return
+        title = self.current_build_title
+        now = time.monotonic()
+        if (
+            self.byte_progress_started_at is None
+            or self.byte_progress_title != title
+            or total != self.byte_progress_total
+            or current < self.byte_progress_current
+        ):
+            self.byte_progress_started_at = now
+            self.byte_progress_start = current
+            self.byte_progress_title = title
+        self.byte_progress_current = min(current, total)
+        self.byte_progress_total = total
+
+    def _byte_remaining_seconds(self) -> float | None:
+        if (
+            self.current_build_stage != 1
+            or self.byte_progress_started_at is None
+            or self.byte_progress_total <= 0
+        ):
+            return None
+        if self.byte_progress_current >= self.byte_progress_total:
+            return 0.0
+        elapsed = time.monotonic() - self.byte_progress_started_at
+        processed = self.byte_progress_current - self.byte_progress_start
+        if elapsed < 1.0 or processed <= 0:
+            return None
+        rate = processed / elapsed
+        return (
+            (self.byte_progress_total - self.byte_progress_current) / rate
+            if rate > 0
+            else None
+        )
 
     def _update_elapsed_time(self) -> None:
         if self.progress_started_at is None:
             return
         elapsed = time.monotonic() - self.progress_started_at
-        eta = estimate_remaining_seconds(elapsed, self.progress_percent)
+        byte_stage_active = (
+            self.current_build_stage == 1
+            and self.byte_progress_started_at is not None
+        )
+        byte_eta = self._byte_remaining_seconds()
+        eta = (
+            byte_eta
+            if byte_stage_active
+            else estimate_remaining_seconds(elapsed, self.progress_percent)
+        )
         if self.progress_percent >= 100:
             remaining = "00:00"
         elif eta is None or elapsed < 3 or self.progress_percent < 1:
@@ -1000,7 +1078,7 @@ class MainWindow(QMainWindow):
             remaining = f"≈ {format_duration(eta)}"
         self.time_label.setText(
             self._t(
-                "timing",
+                "timing_stage" if byte_stage_active else "timing",
                 elapsed=format_duration(elapsed),
                 remaining=remaining,
             )
@@ -1043,8 +1121,22 @@ class MainWindow(QMainWindow):
             package_index = package_total = 1
 
         if scope == "extract":
-            package_progress = (package_index - 1 + ratio) / package_total
-            local = 2.0 + 28.0 * package_progress
+            self._record_byte_progress(event)
+            local = 2.0 + 28.0 * ratio
+            try:
+                package_current = max(
+                    0, int(event.get("package_bytes_current", 0) or 0)
+                )
+                package_size = max(
+                    0, int(event.get("package_bytes_total", 0) or 0)
+                )
+            except (TypeError, ValueError):
+                package_current = package_size = 0
+            package_ratio = (
+                max(0.0, min(1.0, package_current / package_size))
+                if package_size > 0
+                else ratio
+            )
             self._set_build_progress(
                 local,
                 "pkg_status",
@@ -1052,7 +1144,9 @@ class MainWindow(QMainWindow):
                 action_key="extract_pkg",
                 current=package_index,
                 total=package_total,
-                percent=round(ratio * 100),
+                percent=round(package_ratio * 100),
+                done=format_byte_size(package_current),
+                size=format_byte_size(package_size),
             )
             return
         if scope == "merge_package":
@@ -1113,6 +1207,8 @@ class MainWindow(QMainWindow):
         elif kind == "build_stage" and self.progress_kind == "build":
             stage = int(event.get("stage", 0))
             self.current_build_stage = stage
+            if stage != 1:
+                self._reset_byte_progress()
             stage_key = BUILD_STAGE_KEYS.get(stage, "processing")
             self._set_build_progress(
                 BUILD_STAGE_START.get(stage, 0.0),
@@ -1193,6 +1289,7 @@ class MainWindow(QMainWindow):
         title_id = self.build_queue.pop(0)
         self.current_build_title = title_id
         self.current_build_stage = 0
+        self._reset_byte_progress()
         self._set_build_progress(
             0, "build_preparing", title=title_id
         )
@@ -1357,6 +1454,7 @@ class MainWindow(QMainWindow):
         games = self.inventory.get("games", {})
         for title_id, game in sorted(games.items()):
             buildable = bool(game.get("buildable"))
+            total_size = game_source_size(game)
             patches = sorted(
                 {
                     str(item.get("app_version") or "—")
@@ -1375,7 +1473,19 @@ class MainWindow(QMainWindow):
                     ),
                     str(len(game.get("patches", []))),
                     str(len(game.get("dlc", []))),
+                    self._t(
+                        "approximate_size",
+                        size=format_byte_size(total_size),
+                    ),
                 ]
+            )
+            top.setToolTip(
+                6,
+                self._t(
+                    "size_tooltip",
+                    size=format_byte_size(total_size),
+                    bytes=total_size,
+                ),
             )
             top.setData(0, Qt.ItemDataRole.UserRole, title_id)
             top.setCheckState(
@@ -1413,9 +1523,18 @@ class MainWindow(QMainWindow):
                             package_version_text(package),
                             "",
                             "",
+                            format_byte_size(int(package.get("size", 0) or 0)),
                         ]
                     )
                     child.setToolTip(2, str(package.get("path", "")))
+                    child.setToolTip(
+                        6,
+                        self._t(
+                            "size_tooltip",
+                            size=format_byte_size(int(package.get("size", 0) or 0)),
+                            bytes=int(package.get("size", 0) or 0),
+                        ),
+                    )
                     if package.get("duplicate_of"):
                         child.setForeground(2, QColor("#c6a15b"))
                         child.setToolTip(
@@ -1435,27 +1554,61 @@ class MainWindow(QMainWindow):
                     "",
                     "",
                     "",
+                    self._t(
+                        "approximate_size",
+                        size=format_byte_size(
+                            sum(
+                                int(package.get("size", 0) or 0)
+                                for package in unsupported
+                            )
+                        ),
+                    ),
                 ]
             )
             blocked.setForeground(2, QColor("#e58b95"))
             self.games_tree.addTopLevelItem(blocked)
             for package in unsupported:
                 child = QTreeWidgetItem(
-                    ["", "PKG", Path(package.get("path", "")).name, "—", "", ""]
+                    [
+                        "",
+                        "PKG",
+                        Path(package.get("path", "")).name,
+                        "—",
+                        "",
+                        "",
+                        format_byte_size(int(package.get("size", 0) or 0)),
+                    ]
                 )
                 child.setToolTip(2, str(package.get("reason") or package.get("error") or ""))
                 blocked.addChild(child)
             blocked.setExpanded(True)
 
+        self.games_tree.blockSignals(False)
+        self._update_inventory_summary()
+        self._update_controls()
+
+    def _update_inventory_summary(self) -> None:
+        if self.inventory is None:
+            return
+        selected_size = 0
+        games = self.inventory.get("games", {})
+        for index in range(self.games_tree.topLevelItemCount()):
+            item = self.games_tree.topLevelItem(index)
+            title_id = item.data(0, Qt.ItemDataRole.UserRole)
+            if (
+                title_id
+                and item.checkState(0) == Qt.CheckState.Checked
+                and str(title_id) in games
+            ):
+                selected_size += game_source_size(games[str(title_id)])
         summary = inventory_summary(self.inventory)
         self._set_summary(
             "inventory_summary",
             games=summary["games"],
             buildable=summary["buildable"],
+            selected_size=format_byte_size(selected_size),
             unsupported=summary["unsupported"],
         )
-        self.games_tree.blockSignals(False)
-        self._update_controls()
 
     def _finish_build_batch(self) -> None:
         failed = [
@@ -1510,6 +1663,7 @@ class MainWindow(QMainWindow):
         )
 
     def _tree_item_changed(self, _item: QTreeWidgetItem, _column: int) -> None:
+        self._update_inventory_summary()
         self._update_controls()
 
     def _has_checked_game(self) -> bool:

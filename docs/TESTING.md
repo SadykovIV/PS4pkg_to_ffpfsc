@@ -17,7 +17,7 @@ path traversal, symlinks, duplicates, conflicting bases, orphan patches,
 overlay reports, deterministic JSON, sparse files above 4 GiB, stat-based resume,
 and a real MkPFS nested-exFAT integration.
 
-Latest local result on Apple Silicon: CMake/CTest passed; pytest `59 passed`;
+Latest local result on Apple Silicon: CMake/CTest passed; pytest `62 passed`;
 GUI smoke passed. Regression tests explicitly fail if normal scan, unpack,
 resume, or build code attempts to call the full-file SHA-256 helper. A prior
 Journey artifact passed outer MkPFS verification with zero errors and exact
@@ -37,3 +37,13 @@ The reported Beat Saber directory was also scanned through the frozen worker:
 without full-file SHA-256 reads. Its inventory correctly reports one patch and
 246 DLC packages, but no `CATEGORY=gd` base package, so readiness is blocked
 with an explicit GUI explanation rather than a disabled button.
+
+The 243 MiB Beat Saber base PKG was extracted with both the v0.2.2 helper and
+the optimized helper on the same Apple Silicon Mac. Diagnostics found that
+64 KiB random reads over SMB were the main cold-cache bottleneck, so the helper
+now combines a persistent descriptor with a bounded 8 MiB read-ahead cache.
+Full per-file SHA-256 manifests from the old and new helpers were identical
+(138 files, 306,326,961 bytes). A real end-to-end build completed extraction,
+merge, FFPFSC packing, container verification and temporary-workspace cleanup
+in 20.6 seconds on the test Mac. The byte progress stream reported the expected
+decompressed payload without recursively walking the output directory.

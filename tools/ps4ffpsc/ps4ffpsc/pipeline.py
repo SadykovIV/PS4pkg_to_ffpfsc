@@ -271,7 +271,11 @@ def unpack_game(settings: Settings, inventory: dict[str, Any], title_id: str) ->
     results: list[dict[str, Any]] = []
 
     selected_total = len(selected)
+    source_sizes = [max(0, int(item.get("size", 0))) for item in selected]
+    source_total = max(sum(source_sizes), 1)
+    completed_source = 0
     for package_index, package in enumerate(selected, start=1):
+        package_source_size = source_sizes[package_index - 1]
         destination = package_destination(root, package)
         package["extracted_path"] = str(destination)
         source_id = package["source_id"]
@@ -286,6 +290,19 @@ def unpack_game(settings: Settings, inventory: dict[str, Any], title_id: str) ->
         ):
             results.append(saved)
             LOG.info("resume: verified package already extracted: %s", package["path"])
+            completed_source += package_source_size
+            _emit_gui_progress(
+                "extract",
+                current=completed_source,
+                total=source_total,
+                package_index=package_index,
+                package_total=selected_total,
+                package_name=Path(package["path"]).name,
+                package_bytes_current=package_source_size,
+                package_bytes_total=package_source_size,
+                package_source_size=package_source_size,
+                resumed=True,
+            )
             continue
         if settings.resume and saved and destination.exists():
             LOG.warning(
@@ -325,15 +342,44 @@ def unpack_game(settings: Settings, inventory: dict[str, Any], title_id: str) ->
                 "extract_complete",
             }:
                 return
-            current = int(event.get("current", event.get("files", 0)) or 0)
-            total = int(event.get("total", event.get("files", 0)) or 0)
+            event_name = str(event.get("event"))
+            byte_current = int(
+                event.get("bytes_current", event.get("current", 0)) or 0
+            )
+            byte_total = int(
+                event.get("bytes_total", event.get("total", 0)) or 0
+            )
+            if event_name == "extract_complete":
+                package_ratio = 1.0
+            elif byte_total > 0:
+                package_ratio = max(0.0, min(1.0, byte_current / byte_total))
+            else:
+                files_current = int(
+                    event.get("files_current", event.get("files", 0)) or 0
+                )
+                files_total = int(event.get("files_total", 0) or 0)
+                package_ratio = (
+                    max(0.0, min(1.0, files_current / files_total))
+                    if files_total > 0
+                    else 0.0
+                )
+            weighted_current = completed_source + round(
+                package_source_size * package_ratio
+            )
             _emit_gui_progress(
                 "extract",
-                current=current,
-                total=max(total, 1),
+                current=min(weighted_current, source_total),
+                total=source_total,
                 package_index=package_index,
                 package_total=selected_total,
                 package_name=Path(package["path"]).name,
+                package_bytes_current=max(0, byte_current),
+                package_bytes_total=max(0, byte_total),
+                package_source_size=package_source_size,
+                files_current=int(
+                    event.get("files_current", event.get("files", 0)) or 0
+                ),
+                files_total=int(event.get("files_total", 0) or 0),
             )
 
         process = _run_captured(
@@ -372,6 +418,7 @@ def unpack_game(settings: Settings, inventory: dict[str, Any], title_id: str) ->
         state["packages"][source_id] = record
         _save_state(root, state)
         results.append(record)
+        completed_source += package_source_size
 
     manifest = {
         "schema_version": 1,

@@ -8,8 +8,10 @@ from mkpfs.pbar import Progress
 from ps4ffpsc.gui_model import (
     build_error_text,
     estimate_remaining_seconds,
+    format_byte_size,
     format_duration,
     game_block_reason,
+    game_source_size,
     inventory_summary,
     normalize_pkg_files,
     package_version_text,
@@ -103,6 +105,27 @@ def test_duration_and_eta_are_stable_for_gui_display() -> None:
     assert estimate_remaining_seconds(30, 25) == 90
     assert estimate_remaining_seconds(30, 100) == 0
     assert estimate_remaining_seconds(30, 0) is None
+
+
+def test_pkg_and_game_sizes_are_formatted_and_summed() -> None:
+    game = {
+        "base": [{"size": 1024**3, "supported": True}],
+        "patches": [{"size": 512 * 1024**2, "supported": True}],
+        "dlc": [{"size": 128 * 1024**2, "supported": True}],
+        "unknown": [
+            {"size": 64 * 1024**2, "supported": False},
+            {
+                "size": 256 * 1024**2,
+                "supported": True,
+                "duplicate_of": "original.pkg",
+            },
+        ],
+    }
+
+    assert format_byte_size(0) == "0 B"
+    assert format_byte_size(1536 * 1024**2) == "1.5 GiB"
+    assert game_source_size(game) == 1664 * 1024**2
+    assert format_byte_size(game_source_size(game)) == "1.6 GiB"
 
 
 def test_mkpfs_emits_machine_readable_progress_for_gui(

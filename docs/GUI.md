@@ -32,7 +32,9 @@ immediately. It does not perform a full source-file hash pass.
    macOS), or choose a different directory/volume. The GUI shows its currently
    available space and remembers the choice.
 4. Scan. The tree groups BASE, PATCH and DLC packages by TITLE_ID and shows
-   conflicts or unsupported packages without selecting them for a build.
+   conflicts or unsupported packages without selecting them for a build. A
+   dedicated size column shows every PKG, the approximate total source size of
+   each game, and the summary shows the total size of checked games.
 5. Keep or clear the check mark beside every buildable game.
 6. Choose compatibility and DLC policy, then build.
 
@@ -43,9 +45,13 @@ base `CATEGORY=gd` is required before it can be built with its DLC.
 
 The progress area shows the overall percentage for all selected games, the
 current stage and substage, exact elapsed time, and an estimated remaining time.
-PKG extraction and MkPFS compression/verification stream structured progress
-to the GUI. Before enough work has completed for a useful estimate,
-the remaining-time field explicitly says that it is still being calculated.
+During extraction, the native helper reports actual bytes written from inside
+the decrypt/write loop. Each package's extraction ratio is weighted by its
+source PKG size, so a small base and a large patch no longer receive equal
+weight. The displayed extraction ETA uses this byte rate. MkPFS
+compression/verification continues to stream its own structured progress.
+Before enough work has completed for a useful estimate, the remaining-time
+field explicitly says that it is still being calculated.
 Builds run one TITLE_ID at a time, and the GUI continues with the next selected
 game if one build fails.
 
@@ -60,10 +66,16 @@ entire per-game temporary workspace; a failed or cancelled build keeps the
 verified state required for resume. Neither cleanup path changes source PKGs or
 completed output artifacts.
 
+The PKG helper keeps one read handle open for the complete extraction and uses
+a bounded 8 MiB read-ahead cache instead of thousands of tiny 64 KiB
+operations. This reduces SMB/NAS overhead, especially on macOS. Progress
+reporting is throttled and does not recursively measure the temporary
+directory, so the indicator does not introduce extra payload reads or copies.
+
 ## Launch and packaging
 
 Download and completely extract
-`PS4-FFPFSC-v0.2.2-windows-x64.zip`, then launch `PS4 FFPFSC.exe`. The
+`PS4-FFPFSC-v0.2.3-windows-x64.zip`, then launch `PS4 FFPFSC.exe`. The
 accompanying `_internal` directory and `ps4ffpsc-worker.exe` are required parts
 of the self-contained application.
 

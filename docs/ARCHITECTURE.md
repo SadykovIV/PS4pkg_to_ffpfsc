@@ -4,7 +4,11 @@
 shadPS4 0.7.0 PKG source subset. Its
 `inspect --fast` command validates PKG/SFO table bounds, calls `PKG::Open` and
 `PSF::Open`, and emits one JSON object without hashing the full file. `extract` calls
-`PKG::Extract`/`ExtractFiles` into a dedicated `.partial` tree.
+`PKG::Extract`/`ExtractFiles` into a dedicated `.partial` tree. The standalone
+extractor keeps one PKG read descriptor open for the full sequential operation
+and uses a bounded 8 MiB read-ahead cache so a PKG on SMB/NAS is not fetched in
+thousands of tiny 64 KiB round trips. It emits throttled byte counts directly
+after successful output writes.
 
 The Python `ps4ffpsc` layer owns policy:
 
@@ -23,6 +27,11 @@ The normal build path never computes content hashes for source PKGs, extracted
 trees, merge trees, or the completed image. Resume identities use path, size,
 and modification time; tree state uses paths, sizes, and mtimes. The explicit
 `verify` command may still calculate an artifact SHA-256 on request.
+
+Extraction UI progress is derived without scanning the staging tree. The native
+helper reports actual output bytes and its expected decompressed payload size;
+Python converts that per-package ratio into source-size-weighted progress across
+base, patches and DLC.
 
 All subprocesses receive argument arrays and use `shell=False`. A single game
 failure is isolated during `--all`. Exit-code precedence is: insufficient space

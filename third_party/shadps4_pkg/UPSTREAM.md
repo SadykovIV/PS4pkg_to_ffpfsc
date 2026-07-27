@@ -7,3 +7,9 @@ from shadPS4 v0.7.0 archive commit
 The subset includes the local standalone/path-safety adjustments documented in
 `docs/INITIAL_AUDIT.md`. Emulator UI, GPU, audio, Qt and runtime sources are not
 included. The upstream GPL-2.0-or-later license is included as `LICENSE`.
+
+The `PS4FFPSC_STANDALONE` path also keeps a single read descriptor open during
+sequential extraction, uses a bounded 8 MiB read-ahead cache to reduce remote
+filesystem round trips, and exposes written-byte callbacks for throttled
+progress reporting. The non-standalone upstream `ExtractFiles` API remains
+unchanged.

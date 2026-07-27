@@ -63,6 +63,9 @@ public:
     bool IsOpen() const {
         return file_ != nullptr;
     }
+    bool SetBufferSize(size_t size) {
+        return file_ && std::setvbuf(file_, nullptr, _IOFBF, size) == 0;
+    }
     u64 GetSize() const {
         if (!file_) {
             return 0;

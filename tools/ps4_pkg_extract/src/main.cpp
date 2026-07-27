@@ -3,6 +3,7 @@
 
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -402,18 +403,52 @@ static int CommandExtract(const fs::path& path, const fs::path& output) {
             return 1;
         }
         fs::create_directories(output);
-        std::cout << "{\"event\":\"extract_start\",\"files\":0}\n";
         if (!item.pkg.Extract(path, output, reason)) {
             PrintFailure(path, reason.empty() ? "shadPS4 PKG::Extract failed" : reason);
             return 3;
         }
         const u32 count = item.pkg.GetNumberOfFiles();
+        const u64 source_bytes = item.pkg.GetPkgSize();
+        const u64 total_bytes = std::max(item.pkg.GetTotalExtractedSize(), u64{1});
+        u64 extracted_bytes = 0;
+        u64 last_reported_bytes = 0;
+        auto last_reported_at = std::chrono::steady_clock::now();
+        const auto emit_progress = [&](u32 files, bool force) {
+            const auto now = std::chrono::steady_clock::now();
+            const bool byte_interval = extracted_bytes - last_reported_bytes >= 16 * 1024 * 1024;
+            const bool time_interval = now - last_reported_at >= std::chrono::milliseconds(250);
+            if (!force && !byte_interval && !time_interval) {
+                return;
+            }
+            std::cout << "{\"event\":\"extract_progress\",\"current\":" << extracted_bytes
+                      << ",\"total\":" << total_bytes << ",\"bytes_current\":"
+                      << extracted_bytes << ",\"bytes_total\":" << total_bytes
+                      << ",\"source_bytes\":" << source_bytes << ",\"files_current\":"
+                      << files << ",\"files_total\":" << count << "}\n"
+                      << std::flush;
+            last_reported_bytes = extracted_bytes;
+            last_reported_at = now;
+        };
+        std::cout << "{\"event\":\"extract_start\",\"current\":0,\"total\":" << total_bytes
+                  << ",\"bytes_current\":0,\"bytes_total\":" << total_bytes
+                  << ",\"source_bytes\":" << source_bytes << ",\"files_current\":0,"
+                  << "\"files_total\":" << count << "}\n"
+                  << std::flush;
         for (u32 i = 0; i < count; ++i) {
-            item.pkg.ExtractFiles(static_cast<int>(i));
-            std::cout << "{\"event\":\"extract_progress\",\"current\":" << (i + 1)
-                      << ",\"total\":" << count << "}\n";
+            item.pkg.ExtractFiles(static_cast<int>(i), [&](u64 written) {
+                extracted_bytes += written;
+                emit_progress(i, false);
+            });
+            emit_progress(i + 1, false);
         }
-        std::cout << "{\"event\":\"extract_complete\",\"files\":" << count << "}\n";
+        emit_progress(count, true);
+        std::cout << "{\"event\":\"extract_complete\",\"current\":" << total_bytes
+                  << ",\"total\":" << total_bytes << ",\"bytes_current\":"
+                  << extracted_bytes << ",\"bytes_total\":" << total_bytes
+                  << ",\"source_bytes\":" << source_bytes << ",\"files\":" << count
+                  << ",\"files_current\":" << count << ",\"files_total\":" << count
+                  << "}\n"
+                  << std::flush;
         return 0;
     } catch (const std::exception& error) {
         PrintFailure(path, error.what());

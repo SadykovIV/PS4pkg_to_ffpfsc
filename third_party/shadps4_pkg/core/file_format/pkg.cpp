@@ -438,10 +438,66 @@ bool PKG::Extract(const std::filesystem::path& filepath, const std::filesystem::
             }
         }
     }
+#ifdef PS4FFPSC_STANDALONE
+    extraction_file =
+        std::make_unique<Common::FS::IOFile>(pkgpath, Common::FS::FileAccessMode::Read);
+    if (!extraction_file->IsOpen()) {
+        failreason = "Failed to keep the PKG open for extraction";
+        return false;
+    }
+    extraction_file->SetBufferSize(8 * 1024 * 1024);
+    extraction_cache.resize(8 * 1024 * 1024);
+    extraction_cache_offset = 0;
+    extraction_cache_size = 0;
+#endif
     return true;
 }
 
+#ifdef PS4FFPSC_STANDALONE
+bool PKG::ReadExtractionData(u64 offset, std::span<u8> output) {
+    const u64 end = offset + output.size();
+    const u64 cached_end = extraction_cache_offset + extraction_cache_size;
+    if (
+        end >= offset && offset >= extraction_cache_offset && end <= cached_end
+    ) {
+        std::memcpy(
+            output.data(),
+            extraction_cache.data() + static_cast<size_t>(offset - extraction_cache_offset),
+            output.size()
+        );
+        return true;
+    }
+
+    static constexpr u64 Alignment = 4 * 1024 * 1024;
+    extraction_cache_offset = offset & ~(Alignment - 1);
+    if (!extraction_file->Seek(static_cast<s64>(extraction_cache_offset))) {
+        return false;
+    }
+    extraction_cache_size = extraction_file->ReadRaw<u8>(
+        extraction_cache.data(), extraction_cache.size()
+    );
+    const u64 refreshed_end = extraction_cache_offset + extraction_cache_size;
+    if (end < offset || offset < extraction_cache_offset || offset >= refreshed_end) {
+        return false;
+    }
+    const auto available = static_cast<size_t>(
+        std::min<u64>(output.size(), refreshed_end - offset)
+    );
+    std::memcpy(
+        output.data(),
+        extraction_cache.data() + static_cast<size_t>(offset - extraction_cache_offset),
+        available
+    );
+    std::fill(output.begin() + available, output.end(), u8{0});
+    return true;
+}
+#endif
+
+#ifdef PS4FFPSC_STANDALONE
+void PKG::ExtractFiles(const int index, const ExtractionProgress& progress) {
+#else
 void PKG::ExtractFiles(const int index) {
+#endif
     int inode_number = fsTable[index].inode;
     int inode_type = fsTable[index].type;
     std::string inode_name = fsTable[index].name;
@@ -454,8 +510,15 @@ void PKG::ExtractFiles(const int index) {
         Common::FS::IOFile inflated;
         inflated.Open(extractPaths[inode_number], Common::FS::FileAccessMode::Write);
 
+#ifdef PS4FFPSC_STANDALONE
+        if (!inflated.IsOpen() || !extraction_file || !extraction_file->IsOpen()) {
+            throw std::runtime_error("Failed to open PKG extraction input or output");
+        }
+        auto& pkgFile = *extraction_file;
+#else
         Common::FS::IOFile pkgFile; // Open the file for each iteration to avoid conflict.
         pkgFile.Open(pkgpath, Common::FS::FileAccessMode::Read);
+#endif
 
         int size_decompressed = 0;
         std::vector<char> compressedData;
@@ -477,8 +540,14 @@ void PKG::ExtractFiles(const int index) {
             int sectorOffsetMask = (sectorOffset + pfsc_offset) & 0xFFFFF000;
             int previousData = (sectorOffset + pfsc_offset) - sectorOffsetMask;
 
+#ifdef PS4FFPSC_STANDALONE
+            if (!ReadExtractionData(fileOffset - previousData, pfsc)) {
+                throw std::runtime_error("Failed to read cached PKG extraction data");
+            }
+#else
             pkgFile.Seek(fileOffset - previousData);
             pkgFile.Read(pfsc);
+#endif
 
             PKG::crypto.decryptPFS(dataKey, tweakKey, pfsc, pfs_decrypted, currentSector1);
 
@@ -492,15 +561,35 @@ void PKG::ExtractFiles(const int index) {
 
             size_decompressed += 0x10000;
 
-            if (j < nblocks - 1) {
-                inflated.WriteRaw<u8>(decompressedData.data(), decompressedData.size());
-            } else {
-                // This is to remove the zeros at the end of the file.
-                const u32 write_size = decompressedData.size() - (size_decompressed - bsize);
-                inflated.WriteRaw<u8>(decompressedData.data(), write_size);
+            const u32 write_size =
+                j < nblocks - 1
+                    ? static_cast<u32>(decompressedData.size())
+                    : static_cast<u32>(decompressedData.size() - (size_decompressed - bsize));
+            const auto written = inflated.WriteRaw<u8>(decompressedData.data(), write_size);
+            if (written != write_size) {
+                throw std::runtime_error("Failed to write an extracted PKG file");
             }
+#ifdef PS4FFPSC_STANDALONE
+            if (progress) {
+                progress(static_cast<u64>(written));
+            }
+#endif
         }
+#ifndef PS4FFPSC_STANDALONE
         pkgFile.Close();
+#endif
         inflated.Close();
     }
+}
+
+u64 PKG::GetTotalExtractedSize() const {
+    u64 result = 0;
+    for (const auto& entry : fsTable) {
+        if (entry.type != PFS_FILE || entry.inode < 0 ||
+            static_cast<size_t>(entry.inode) >= iNodeBuf.size()) {
+            continue;
+        }
+        result += static_cast<u64>(iNodeBuf[entry.inode].Size);
+    }
+    return result;
 }

@@ -12,11 +12,11 @@ Both release archives are self-contained and include Python, Qt, MkPFS and the
 native PKG helper:
 
 - **Windows x64:** extract
-  `PS4-FFPFSC-v0.2.2-windows-x64.zip` completely, then run
+  `PS4-FFPFSC-v0.2.3-windows-x64.zip` completely, then run
   `PS4 FFPFSC.exe`. Keep the accompanying files in the extracted directory.
   An unsigned build may require explicit approval in Microsoft Defender
   SmartScreen on first launch.
-- **macOS arm64:** extract `PS4-FFPFSC-v0.2.2-macos-arm64.zip`, move
+- **macOS arm64:** extract `PS4-FFPFSC-v0.2.3-macos-arm64.zip`, move
   `PS4 FFPFSC.app` to `/Applications`, then use
   **Control-click → Open** for the first launch of the current ad-hoc-signed
   build.
@@ -36,6 +36,10 @@ games, streams the operation log, remains responsive during conversion, and
 supports cancellation/resume. Source PKGs are never modified.
 The **Русский / English** selector in the header switches the complete GUI
 localization immediately and remembers the selected language.
+The discovered-games table shows each PKG size, the approximate total source
+size per game, and the total size of checked games. During extraction, progress
+and the stage ETA follow bytes actually written, weighted by the source sizes
+of base, patch and DLC packages.
 
 The Windows x64 release is reproducibly built and smoke-tested by
 `.github/workflows/build-windows-x64.yml` on a native Windows runner. The
@@ -57,6 +61,12 @@ fallback. Extracted package trees are discarded after a verified merge, and the
 per-game temporary workspace is removed after a fully successful build. Failed
 or cancelled builds keep verified resumable state. Source PKGs and completed
 artifacts are never removed.
+
+The native extractor keeps the source PKG open for the complete extraction and
+uses a bounded 8 MiB read-ahead cache instead of thousands of tiny 64 KiB
+operations. This reduces SMB/NAS overhead. Byte progress comes directly from
+the decrypt/write loop; the GUI does not repeatedly scan the temporary tree or
+create progress-only copies.
 
 `ps4ffpsc` converts legally owned, shadPS4-supported PS4 PKGs into verified
 ShadowMountPlus `.ffpfsc` artifacts:

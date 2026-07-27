@@ -1,4 +1,4 @@
-# PS4 FFPFSC 0.2.2 — Windows x64
+# PS4 FFPFSC 0.2.3 — Windows x64
 
 ## Русская версия
 
@@ -6,6 +6,21 @@
 MkPFS, библиотеки сжатия/криптографии и модуль чтения и извлечения PS4 PKG уже
 находятся внутри архива. Установка Python, Visual C++ Redistributable, Git,
 Homebrew или других приложений не требуется.
+
+### Изменения 0.2.3
+
+- В таблицу **«3. Найденные игры»** добавлен размер каждого PKG и примерный
+  суммарный размер выбранной игры; сводка также показывает общий объём
+  отмеченных игр.
+- Процент распаковки теперь рассчитывается по реально записанным байтам, а
+  вклад base/patch/DLC в общий прогресс взвешивается по размеру исходных PKG.
+  Для этапа распаковки показывается отдельная оценка оставшегося времени.
+- Нативный PKG extractor держит исходный файл открытым в течение всей
+  распаковки и использует ограниченный 8 MiB read-ahead cache вместо тысяч
+  мелких чтений по 64 KiB, что особенно полезно для сетевых папок.
+- Байтовые события прогресса передаются напрямую из цикла расшифровки с
+  ограниченной частотой; временное дерево не сканируется во время распаковки.
+- Версия приложения и автономных архивов обновлена до 0.2.3.
 
 ### Исправления 0.2.2
 
@@ -56,6 +71,21 @@ Self-contained build for 64-bit Windows 10/11. Python, Qt for Python, MkPFS,
 compression/cryptography libraries and the PS4 PKG inspection/extraction helper
 are included. Python, the Visual C++ Redistributable, Git, Homebrew and other
 applications are not required.
+
+## Changes in 0.2.3
+
+- The **3. Discovered games** table now shows every PKG size and an approximate
+  total source size per game; the summary also shows the total size of checked
+  games.
+- Extraction progress now follows bytes actually written, while base, patch and
+  DLC contributions are weighted by source PKG size. Extraction has its own
+  byte-rate ETA.
+- The native PKG extractor keeps one source file descriptor open for the whole
+  operation and uses a bounded 8 MiB read-ahead cache instead of thousands of
+  tiny 64 KiB reads, improving network-folder performance.
+- Throttled byte progress is emitted directly by the decrypt/write loop, so the
+  temporary tree is not repeatedly scanned during extraction.
+- Application and standalone archive versions were updated to 0.2.3.
 
 ## Fixes in 0.2.2
 

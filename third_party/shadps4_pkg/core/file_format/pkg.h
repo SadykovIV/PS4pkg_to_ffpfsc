@@ -5,6 +5,9 @@
 
 #include <array>
 #include <filesystem>
+#include <functional>
+#include <memory>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -13,6 +16,12 @@
 #include "pfs.h"
 #ifndef PS4FFPSC_STANDALONE
 #include "trp.h"
+#endif
+
+#ifdef PS4FFPSC_STANDALONE
+namespace Common::FS {
+class IOFile;
+}
 #endif
 
 struct PKGHeader {
@@ -106,7 +115,12 @@ public:
     ~PKG();
 
     bool Open(const std::filesystem::path& filepath, std::string& failreason);
+#ifdef PS4FFPSC_STANDALONE
+    using ExtractionProgress = std::function<void(u64)>;
+    void ExtractFiles(int index, const ExtractionProgress& progress = {});
+#else
     void ExtractFiles(const int index);
+#endif
     bool Extract(const std::filesystem::path& filepath, const std::filesystem::path& extract,
                  std::string& failreason);
 
@@ -119,6 +133,8 @@ public:
     u64 GetPkgSize() const {
         return pkgSize;
     }
+
+    u64 GetTotalExtractedSize() const;
 
     std::string GetPkgFlags() const {
         return pkgFlags;
@@ -175,4 +191,11 @@ private:
     std::filesystem::path pkgpath;
     std::filesystem::path current_dir;
     std::filesystem::path extract_path;
+#ifdef PS4FFPSC_STANDALONE
+    std::unique_ptr<Common::FS::IOFile> extraction_file;
+    std::vector<u8> extraction_cache;
+    u64 extraction_cache_offset = 0;
+    size_t extraction_cache_size = 0;
+    bool ReadExtractionData(u64 offset, std::span<u8> output);
+#endif
 };
