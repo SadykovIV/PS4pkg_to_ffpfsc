@@ -12,19 +12,21 @@ Both release archives are self-contained and include Python, Qt, MkPFS and the
 native PKG helper:
 
 - **Windows x64:** extract
-  `PS4-FFPFSC-v0.2.4-windows-x64.zip` completely, then run
+  `PS4-FFPFSC-v0.2.5-windows-x64.zip` completely, then run
   `PS4 FFPFSC.exe`. Keep the accompanying files in the extracted directory.
   An unsigned build may require explicit approval in Microsoft Defender
   SmartScreen on first launch.
-- **macOS arm64:** extract `PS4-FFPFSC-v0.2.4-macos-arm64.zip`, move
+- **macOS arm64:** extract `PS4-FFPFSC-v0.2.5-macos-arm64.zip`, move
   `PS4 FFPFSC.app` to `/Applications`, then use
   **Control-click → Open** for the first launch of the current ad-hoc-signed
   build.
 
-Version 0.2.4 fixes Windows extractor crashes with code `0xC0000374` on some
-patch PKGs, augments game-provided `param.json` metadata for ShadowMountPlus
-without losing `gameIntent`, and removes an overly conservative repeated
-free-space check.
+Version 0.2.5 adds per-PKG selection, safe exact-duplicate detection,
+compression levels 0–9, and all available MkPFS workers. Interrupted extraction
+now resumes at the first unfinished PKG, while Windows stores temporary data
+under `%TEMP%` by default.
+
+See the complete release history in [CHANGELOG.md](CHANGELOG.md).
 
 To reproduce the macOS release from source:
 
@@ -41,10 +43,13 @@ games, streams the operation log, remains responsive during conversion, and
 supports cancellation/resume. Source PKGs are never modified.
 The **Русский / English** selector in the header switches the complete GUI
 localization immediately and remembers the selected language.
-The discovered-games table shows each PKG size, the approximate total source
-size per game, and the total size of checked games. During extraction, progress
-and the stage ETA follow bytes actually written, weighted by the source sizes
-of base, patch and DLC packages.
+The discovered-games table lets each PKG be selected independently and shows
+its size, the approximate total source size per game, and the total size of
+checked packages. All supported packages are checked by default. Exact copies
+identified by the embedded package digest are marked as duplicates and
+unchecked without a full-file hash pass; different `part1`/`part2` packages
+remain selected. During extraction, progress and the stage ETA follow bytes
+actually written, weighted by the source sizes of base, patch and DLC packages.
 
 The Windows x64 release is reproducibly built and smoke-tested by
 `.github/workflows/build-windows-x64.yml` on a native Windows runner. The
@@ -66,6 +71,12 @@ fallback. Extracted package trees are discarded after a verified merge, and the
 per-game temporary workspace is removed after a fully successful build. Failed
 or cancelled builds keep verified resumable state. Source PKGs and completed
 artifacts are never removed.
+
+On a later run, the application quickly compares each previously extracted tree
+using file metadata only—relative paths, sizes, and modification times—without
+opening payload contents. Matching PKGs are reused, and extraction continues
+only for new, changed, or previously failed packages. State is saved after each
+successful PKG extraction.
 
 The native extractor keeps the source PKG open for the complete extraction and
 uses a bounded 8 MiB read-ahead cache instead of thousands of tiny 64 KiB
@@ -100,6 +111,13 @@ verification and extraction/validation of the required metadata paths.
 
 Run `./ps4ffpsc --help` for commands and per-command options. The defaults are in
 `ps4ffpsc.toml`; CLI arguments win.
+
+The GUI exposes FFPFSC compression levels 0 through 9 and remembers the
+selection. Level 0 disables deflate compression, level 1 is faster and usually
+produces a larger image, level 9 maximizes compression at the cost of time, and
+level 7 remains the default. MkPFS automatically receives every logical CPU
+available to the process; the GUI displays that worker count instead of using
+MkPFS's capped auto mode.
 
 ## Compatibility truth
 

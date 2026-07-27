@@ -48,6 +48,53 @@ def test_macos_default_temporary_directory_is_tmp(monkeypatch) -> None:
     assert runtime.default_temporary_directory() == Path("/tmp")
 
 
+def test_windows_default_temporary_directory_uses_temp_environment(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    windows_temp = tmp_path / "Windows TEMP"
+    monkeypatch.setattr(runtime.sys, "platform", "win32")
+    monkeypatch.setenv("TEMP", str(windows_temp))
+
+    assert runtime.default_temporary_directory() == windows_temp.resolve()
+
+
+def test_maximum_logical_cpu_count_uses_process_available_cpus(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        runtime.os,
+        "process_cpu_count",
+        lambda: 24,
+        raising=False,
+    )
+    monkeypatch.setattr(runtime.os, "cpu_count", lambda: 4)
+
+    assert runtime.maximum_logical_cpu_count() == 24
+
+
+def test_maximum_logical_cpu_count_uses_affinity_and_never_returns_zero(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        runtime.os,
+        "process_cpu_count",
+        lambda: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        runtime.os,
+        "sched_getaffinity",
+        lambda _pid: {0, 1, 2, 3, 4, 5},
+        raising=False,
+    )
+    assert runtime.maximum_logical_cpu_count() == 6
+
+    monkeypatch.setattr(runtime.os, "sched_getaffinity", lambda _pid: set())
+    monkeypatch.setattr(runtime.os, "cpu_count", lambda: None)
+    assert runtime.maximum_logical_cpu_count() == 1
+
+
 def test_application_data_root_does_not_create_heavy_workspace(
     tmp_path: Path,
 ) -> None:

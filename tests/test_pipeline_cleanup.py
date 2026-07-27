@@ -125,6 +125,12 @@ def test_successful_build_removes_only_its_temporary_workspace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     settings = _settings(tmp_path)
+    settings.compression_level = 9
+    monkeypatch.setattr(
+        pipeline,
+        "maximum_logical_cpu_count",
+        lambda: 12,
+    )
     source = tmp_path / "source.pkg"
     source.write_bytes(b"owned source")
     inventory = _inventory(source)
@@ -151,10 +157,33 @@ def test_successful_build_removes_only_its_temporary_workspace(
     assert result["temporary_workspace_cleaned"] is True
     assert result["sha256"] is None
     assert result["checksum_generated"] is False
+    assert result["compression_level"] == 9
+    assert result["compression_workers"] == 12
+    assert result["compression_workers_mode"] == "maximum_available_logical_cpus"
     assert not output.with_name(f"{output.name}.sha256").exists()
     assert read_json(output.with_suffix(".manifest.json"))[
         "temporary_workspace_cleaned"
     ] is True
+
+
+def test_mkpfs_compression_arguments_use_selected_level_and_all_cpus(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(tmp_path)
+    settings.compression_level = 3
+    monkeypatch.setattr(
+        pipeline,
+        "maximum_logical_cpu_count",
+        lambda: 20,
+    )
+
+    assert pipeline.mkpfs_compression_arguments(settings) == [
+        "--cpu-count",
+        "20",
+        "--compression-level",
+        "3",
+    ]
 
 
 def test_failed_verification_keeps_resumable_merged_workspace(
@@ -230,6 +259,162 @@ def test_unpack_does_not_hash_source_or_extracted_payloads(
     assert package["source_id"].startswith("stat-")
     assert "sha256" not in package
     assert manifest["extractions"][0]["tree_signature"].startswith("stat-")
+
+
+def test_unpack_resumes_verified_pkg_and_extracts_only_pending_pkg(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path)
+    base_source = tmp_path / "base.pkg"
+    patch_source = tmp_path / "patch.pkg"
+    base_source.write_bytes(b"base source")
+    patch_source.write_bytes(b"patch source is larger")
+    inventory = _inventory(base_source)
+    game = inventory["games"]["CUSA12345"]
+    base = game["base"][0]
+    patch = {
+        "kind": "patch",
+        "supported": True,
+        "app_version": "01.10",
+        "path": str(patch_source),
+        "size": patch_source.stat().st_size,
+    }
+    game["patches"] = [patch]
+    base["source_id"] = file_stat_identity(base_source)
+    root = settings.unpacked_dir / game["directory_name"]
+    base_destination = pipeline.package_destination(root, base)
+    base_destination.mkdir(parents=True)
+    (base_destination / "base.bin").write_bytes(b"already extracted")
+    base_record = {
+        "status": "verified",
+        "source_path": str(base_source),
+        "source_id": base["source_id"],
+        "destination": str(base_destination),
+        "tree_signature": tree_stat_signature(base_destination),
+        "file_count": 1,
+        "total_size": len(b"already extracted"),
+    }
+    atomic_write_json(
+        root / ".ps4ffpsc-state.json",
+        {
+            "schema_version": EXTRACTION_STATE_SCHEMA_VERSION,
+            "extractor_revision": EXTRACTOR_REVISION,
+            "packages": {base["source_id"]: base_record},
+        },
+    )
+    disk_requirements: list[int] = []
+    extracted_sources: list[Path] = []
+    monkeypatch.setattr(
+        pipeline,
+        "check_disk_space",
+        lambda _path, required: disk_requirements.append(required),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "extractor_or_raise",
+        lambda *_args: tmp_path / "extractor",
+    )
+
+    def fake_extract(
+        command: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        extracted_sources.append(Path(command[2]))
+        destination = Path(command[command.index("--output") + 1])
+        destination.mkdir(parents=True)
+        (destination / "patch.bin").write_bytes(b"new extraction")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(pipeline, "_run_captured", fake_extract)
+
+    manifest = pipeline.unpack_game(settings, inventory, "CUSA12345")
+
+    assert extracted_sources == [patch_source]
+    assert disk_requirements == [pipeline._disk_required([patch], 1.25)]
+    assert manifest["extractions"][0] == base_record
+    assert manifest["extractions"][1]["source_path"] == str(patch_source)
+    assert base_destination.joinpath("base.bin").read_bytes() == b"already extracted"
+
+
+def test_unpack_fully_resumed_skips_extractor_and_space_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path)
+    source = tmp_path / "source.pkg"
+    source.write_bytes(b"source")
+    inventory = _inventory(source)
+    game = inventory["games"]["CUSA12345"]
+    package = game["base"][0]
+    package["source_id"] = file_stat_identity(source)
+    root = settings.unpacked_dir / game["directory_name"]
+    destination = pipeline.package_destination(root, package)
+    destination.mkdir(parents=True)
+    (destination / "payload.bin").write_bytes(b"complete")
+    atomic_write_json(
+        root / ".ps4ffpsc-state.json",
+        {
+            "schema_version": EXTRACTION_STATE_SCHEMA_VERSION,
+            "extractor_revision": EXTRACTOR_REVISION,
+            "packages": {
+                package["source_id"]: {
+                    "status": "verified",
+                    "source_path": str(source),
+                    "source_id": package["source_id"],
+                    "destination": str(destination),
+                    "tree_signature": tree_stat_signature(destination),
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "check_disk_space",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("no new extraction needs a space check")
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "extractor_or_raise",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("no new extraction needs the helper")
+        ),
+    )
+
+    manifest = pipeline.unpack_game(settings, inventory, "CUSA12345")
+
+    assert len(manifest["extractions"]) == 1
+    assert manifest["extractions"][0]["status"] == "verified"
+
+
+def test_missing_state_is_recovered_from_current_manifest(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "unpacked" / "CUSA12345 - Synthetic Game"
+    destination = root / "packages" / "base" / "existing"
+    destination.mkdir(parents=True)
+    (destination / "payload.bin").write_bytes(b"existing")
+    record = {
+        "status": "verified",
+        "source_id": "stat-existing",
+        "source_path": str(tmp_path / "source.pkg"),
+        "destination": str(destination),
+        "tree_signature": tree_stat_signature(destination),
+    }
+    atomic_write_json(
+        root / "manifest.json",
+        {
+            "extractor_revision": EXTRACTOR_REVISION,
+            "extractions": [record],
+        },
+    )
+
+    state = pipeline._load_state(root)
+
+    assert state["packages"] == {"stat-existing": record}
+    assert state["extractor_revision"] == EXTRACTOR_REVISION
+    assert read_json(root / ".ps4ffpsc-state.json")["packages"] == {
+        "stat-existing": record
+    }
 
 
 def test_unpack_rejects_pkg_changed_after_fast_metadata_scan(tmp_path: Path) -> None:

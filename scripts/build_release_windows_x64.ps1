@@ -9,7 +9,7 @@ $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $BuildRoot = Join-Path $ProjectRoot "build-release-windows"
 $ReleaseRoot = Join-Path $ProjectRoot "release"
 $AppPath = Join-Path $BuildRoot "dist\PS4 FFPFSC"
-$Version = "0.2.4"
+$Version = "0.2.5"
 
 if (-not $IsWindows) {
     throw "This release script must run on Windows."
@@ -125,7 +125,7 @@ $ChecksumLine = "$Digest  $([System.IO.Path]::GetFileName($Archive))`n"
     $ChecksumLine,
     [System.Text.Encoding]::ASCII
 )
-Copy-Item (Join-Path $ProjectRoot "packaging\windows\RELEASE_NOTES.md") `
+Copy-Item (Join-Path $ProjectRoot "packaging\releases\v$Version.md") `
     (Join-Path $ReleaseRoot "RELEASE_NOTES-v$Version-windows-x64.md")
 
 Write-Host "Release created: $Archive"

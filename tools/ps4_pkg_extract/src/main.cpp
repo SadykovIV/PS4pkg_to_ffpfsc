@@ -80,6 +80,16 @@ static std::string Sha256File(const fs::path& path) {
     return result.str();
 }
 
+template <size_t Size>
+static std::string HexBytes(const u8 (&bytes)[Size]) {
+    std::ostringstream result;
+    for (const auto byte : bytes) {
+        result << std::hex << std::setw(2) << std::setfill('0')
+               << static_cast<unsigned>(byte);
+    }
+    return result.str();
+}
+
 static bool ValidatePkgEnvelope(const fs::path& path, std::string& reason) {
     std::error_code ec;
     const auto size = fs::file_size(path, ec);
@@ -330,7 +340,8 @@ static void PrintInspection(const fs::path& path, const Inspection& item) {
     } else {
         std::cout << "null";
     }
-    std::cout << ",\"size\":" << item.pkg.GetPkgSize() << ",\"localized_titles\":{";
+    std::cout << ",\"size\":" << item.pkg.GetPkgSize() << ",\"package_digest\":\""
+              << HexBytes(header.pkg_digest) << "\",\"localized_titles\":{";
     first = true;
     for (int i = 0; i < 30; ++i) {
         std::ostringstream key;

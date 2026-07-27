@@ -6,7 +6,7 @@ PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 BUILD_ROOT="${PROJECT_ROOT}/build-release"
 RELEASE_ROOT="${PROJECT_ROOT}/release"
 APP_PATH="${BUILD_ROOT}/dist/PS4 FFPFSC.app"
-VERSION="0.2.4"
+VERSION="0.2.5"
 
 if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
   echo "This release must be built natively on macOS arm64." >&2
@@ -81,7 +81,7 @@ PS4FFPSC_DATA_ROOT="${SMOKE_ROOT}" QT_QPA_PLATFORM=offscreen \
 ARCHIVE="${RELEASE_ROOT}/PS4-FFPFSC-v${VERSION}-macos-arm64.zip"
 ditto -c -k --sequesterRsrc --keepParent "${APP_PATH}" "${ARCHIVE}"
 (cd "${RELEASE_ROOT}" && shasum -a 256 "$(basename "${ARCHIVE}")" > "$(basename "${ARCHIVE}").sha256")
-cp "${PROJECT_ROOT}/packaging/macos/RELEASE_NOTES.md" \
+cp "${PROJECT_ROOT}/packaging/releases/v${VERSION}.md" \
   "${RELEASE_ROOT}/RELEASE_NOTES-v${VERSION}.md"
 
 echo "Release created: ${ARCHIVE}"

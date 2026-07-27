@@ -5,12 +5,21 @@ from pathlib import Path
 
 import pytest
 
-from ps4ffpsc.pipeline import Settings, _verify_image, mkpfs_command
+from ps4ffpsc.pipeline import (
+    Settings,
+    _verify_image,
+    mkpfs_command,
+    mkpfs_compression_arguments,
+)
 from ps4ffpsc.sfo import build_param_json, make_sfo
 
 
 @pytest.mark.integration
-def test_mkpfs_nested_exfat_build_verify_and_deep_unpack(tmp_path: Path) -> None:
+@pytest.mark.parametrize("compression_level", [0, 9])
+def test_mkpfs_nested_exfat_build_verify_and_deep_unpack(
+    tmp_path: Path,
+    compression_level: int,
+) -> None:
     root = Path(__file__).resolve().parents[1]
     settings = Settings(
         root=root,
@@ -19,6 +28,7 @@ def test_mkpfs_nested_exfat_build_verify_and_deep_unpack(tmp_path: Path) -> None
         output_dir=tmp_path / "output",
         work_dir=tmp_path / "work",
         temp_dir=tmp_path / "work" / "tmp",
+        compression_level=compression_level,
     )
     settings.temp_dir.mkdir(parents=True)
     source = tmp_path / "Игра с пробелами"
@@ -41,6 +51,7 @@ def test_mkpfs_nested_exfat_build_verify_and_deep_unpack(tmp_path: Path) -> None
             "PS5",
             "--inode-bits",
             "32",
+            *mkpfs_compression_arguments(settings),
             str(source),
             str(output),
         ],
@@ -50,6 +61,7 @@ def test_mkpfs_nested_exfat_build_verify_and_deep_unpack(tmp_path: Path) -> None
         encoding="utf-8",
     )
     assert process.returncode == 0, process.stdout + process.stderr
+    assert f"Zlib level:        {compression_level}" in process.stdout
     result = _verify_image(settings, output, source, "current-smp")
     assert result["verified"]
     assert result["verification_mode"] == "container_and_required_files"

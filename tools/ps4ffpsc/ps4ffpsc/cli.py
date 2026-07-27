@@ -59,6 +59,12 @@ def _common(parser: argparse.ArgumentParser) -> None:
         help=argparse.SUPPRESS,
     )
     parser.add_argument("--jobs", type=int)
+    parser.add_argument(
+        "--compression-level",
+        type=int,
+        choices=range(0, 10),
+        help="MkPFS zlib compression level (0=store, 1=fastest, 9=maximum; default: 7)",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:

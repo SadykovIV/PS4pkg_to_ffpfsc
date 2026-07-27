@@ -54,6 +54,7 @@ from .runtime import (
     default_temporary_directory,
     ensure_application_directories,
     is_frozen,
+    maximum_logical_cpu_count,
     resource_root,
     temporary_workspace,
     worker_executable,
@@ -61,7 +62,7 @@ from .runtime import (
 
 
 APP_NAME = "PS4 FFPFSC"
-APP_VERSION = "0.2.4"
+APP_VERSION = "0.2.5"
 CREATE_NO_WINDOW = 0x08000000
 BUILD_STAGE_START = {1: 2.0, 2: 30.0, 3: 55.0, 4: 88.0, 5: 96.0}
 BUILD_STAGE_KEYS = {
@@ -91,7 +92,8 @@ TEXTS = {
         "storage_section": "2. Папки хранения",
         "output_files": "Готовые FFPFSC",
         "temp_files": "Временные файлы (по умолчанию /tmp)",
-        "reset_tmp": "Сбросить /tmp",
+        "temp_files_windows": "Временные файлы (по умолчанию %TEMP%)",
+        "reset_tmp": "Сбросить по умолчанию",
         "games_section": "3. Найденные игры",
         "summary_initial": "Сначала выберите источник и запустите сканирование",
         "header_build": "Собрать",
@@ -101,13 +103,13 @@ TEXTS = {
         "header_size": "Размер",
         "log": "Журнал",
         "clear_log": "Очистить журнал",
-        "compatibility": "Совместимость:",
-        "compat_current": "Текущий ShadowMountPlus",
-        "compat_patched": "ShadowMountPlus с патчем",
-        "dlc": "DLC:",
-        "dlc_auto": "Авто (подготовить, не встраивать)",
-        "dlc_separate": "Отдельные образы (экспериментально)",
-        "dlc_off": "Не включать",
+        "compression": "Сжатие FFPFSC:",
+        "compression_level_none": "0 — без deflate-сжатия",
+        "compression_level_value": "Уровень {level}",
+        "compression_level_fast": "1 — быстрее, образ крупнее",
+        "compression_level_default": "7 — стандартное",
+        "compression_level_max": "9 — максимальное, медленнее",
+        "compression_threads": "Потоки MkPFS: {count} (автоматически, максимум)",
         "resume": "Продолжать прерванное",
         "force": "Пересобрать существующее",
         "keep_inner": "Сохранить внутренний exFAT",
@@ -201,7 +203,7 @@ TEXTS = {
         "cancelling": "Отмена…",
         "cancel_requested": "Запрошена отмена. Процесс будет остановлен безопасно.",
         "about_title": "О программе {app}",
-        "about_body": "GUI для локального конвейера PS4 PKG → FFPFSC. Поддерживаются только законно полученные PKG, которые может прочитать приложенный shadPS4 0.7.0. Исходные файлы не изменяются.<br><br>Готовый образ создаётся MkPFS и проходит автоматическую проверку.",
+        "about_body": "Приложение для конвертации PS4 PKG в проверенные FFPFSC-образы для ShadowMountPlus Playstation 5<br><br>Автор: Ильдар Садыков <a href=\"https://github.com/SadykovIV/PS4pkg_to_ffpfsc\">SadykovIV/PS4pkg_to_ffpfsc</a>",
         "operation_running": "Операция выполняется",
         "close_running": "Остановить текущую операцию и закрыть программу?",
     },
@@ -215,8 +217,9 @@ TEXTS = {
         "scan": "Scan",
         "storage_section": "2. Storage folders",
         "output_files": "Completed FFPFSC files",
-        "temp_files": "Temporary files (default: system temp)",
-        "reset_tmp": "Reset to system temp",
+        "temp_files": "Temporary files (default: /tmp)",
+        "temp_files_windows": "Temporary files (default: %TEMP%)",
+        "reset_tmp": "Reset to default",
         "games_section": "3. Discovered games",
         "summary_initial": "Select a source and start scanning",
         "header_build": "Build",
@@ -226,13 +229,13 @@ TEXTS = {
         "header_size": "Size",
         "log": "Log",
         "clear_log": "Clear log",
-        "compatibility": "Compatibility:",
-        "compat_current": "Current ShadowMountPlus",
-        "compat_patched": "Patched ShadowMountPlus",
-        "dlc": "DLC:",
-        "dlc_auto": "Auto (prepare, do not embed)",
-        "dlc_separate": "Separate images (experimental)",
-        "dlc_off": "Exclude",
+        "compression": "FFPFSC compression:",
+        "compression_level_none": "0 — no deflate compression",
+        "compression_level_value": "Level {level}",
+        "compression_level_fast": "1 — faster, larger image",
+        "compression_level_default": "7 — standard",
+        "compression_level_max": "9 — maximum, slower",
+        "compression_threads": "MkPFS workers: {count} (automatic maximum)",
         "resume": "Resume interrupted work",
         "force": "Rebuild existing output",
         "keep_inner": "Keep inner exFAT",
@@ -326,7 +329,7 @@ TEXTS = {
         "cancelling": "Cancelling…",
         "cancel_requested": "Cancellation requested. The worker will stop safely.",
         "about_title": "About {app}",
-        "about_body": "GUI for the local PS4 PKG → FFPFSC pipeline. Only legally obtained PKGs supported by the bundled shadPS4 0.7.0 reader are accepted. Source files are never modified.<br><br>The output image is created with MkPFS and verified automatically.",
+        "about_body": "Application for converting PS4 PKGs into verified FFPFSC images for ShadowMountPlus PlayStation 5<br><br>Author: Ildar Sadykov <a href=\"https://github.com/SadykovIV/PS4pkg_to_ffpfsc\">SadykovIV/PS4pkg_to_ffpfsc</a>",
         "operation_running": "Operation in progress",
         "close_running": "Stop the current operation and close the application?",
     },
@@ -370,6 +373,7 @@ class MainWindow(QMainWindow):
         self.stderr_buffer = ""
         self.operation: str | None = None
         self.build_queue: list[str] = []
+        self.selected_packages_by_title: dict[str, tuple[Path, ...]] = {}
         self.build_results: dict[str, Any] = {}
         self.build_total_count = 0
         self.current_build_title: str | None = None
@@ -442,6 +446,31 @@ class MainWindow(QMainWindow):
         self.settings.setValue("language", self.language)
         self._retranslate_ui()
 
+    def _compression_level_text(self, level: int) -> str:
+        if level == 0:
+            return self._t("compression_level_none")
+        if level == 1:
+            return self._t("compression_level_fast")
+        if level == 7:
+            return self._t("compression_level_default")
+        if level == 9:
+            return self._t("compression_level_max")
+        return self._t("compression_level_value", level=level)
+
+    def _update_compression_text(self) -> None:
+        for index in range(self.compression_combo.count()):
+            level = int(self.compression_combo.itemData(index))
+            self.compression_combo.setItemText(
+                index,
+                self._compression_level_text(level),
+            )
+        self.compression_threads_label.setText(
+            self._t(
+                "compression_threads",
+                count=maximum_logical_cpu_count(),
+            )
+        )
+
     def _retranslate_ui(self) -> None:
         for widget, key in self.translated_widgets:
             if hasattr(widget, "setText"):
@@ -457,38 +486,11 @@ class MainWindow(QMainWindow):
                 self._t("header_size"),
             ]
         )
-        combo_text = {
-            "current-smp": "compat_current",
-            "patched-smp": "compat_patched",
-        }
-        for index in range(self.compat_combo.count()):
-            self.compat_combo.setItemText(
-                index, self._t(combo_text[str(self.compat_combo.itemData(index))])
-            )
-        dlc_text = {
-            "auto": "dlc_auto",
-            "separate": "dlc_separate",
-            "off": "dlc_off",
-        }
-        for index in range(self.dlc_combo.count()):
-            self.dlc_combo.setItemText(
-                index, self._t(dlc_text[str(self.dlc_combo.itemData(index))])
-            )
+        self._update_compression_text()
         self._update_source_label()
         self._update_storage_labels()
         if self.inventory is not None:
-            checked = {
-                str(self.games_tree.topLevelItem(index).data(0, Qt.ItemDataRole.UserRole))
-                for index in range(self.games_tree.topLevelItemCount())
-                if self.games_tree.topLevelItem(index).checkState(0)
-                == Qt.CheckState.Checked
-            }
-            self._populate_inventory()
-            for index in range(self.games_tree.topLevelItemCount()):
-                item = self.games_tree.topLevelItem(index)
-                title_id = item.data(0, Qt.ItemDataRole.UserRole)
-                if title_id and str(title_id) not in checked:
-                    item.setCheckState(0, Qt.CheckState.Unchecked)
+            self._populate_inventory(self._package_check_state())
         self._render_stage()
         summary_key, summary_values = self.summary_state
         self.summary_label.setText(self._t(summary_key, **summary_values))
@@ -580,7 +582,10 @@ class MainWindow(QMainWindow):
         output_button = self._bind_text(QPushButton(), "choose_folder")
         output_button.clicked.connect(self._choose_output)
         source_layout.addWidget(output_button, 5, 3)
-        temp_files_label = self._bind_text(QLabel(), "temp_files")
+        temp_files_label = self._bind_text(
+            QLabel(),
+            "temp_files_windows" if sys.platform == "win32" else "temp_files",
+        )
         source_layout.addWidget(temp_files_label, 6, 0, 1, 4)
         self.temp_label = QLabel()
         self.temp_label.setObjectName("pathLabel")
@@ -669,28 +674,32 @@ class MainWindow(QMainWindow):
         options = QGridLayout()
         options.setHorizontalSpacing(10)
         options.setVerticalSpacing(5)
-        compatibility_label = self._bind_text(QLabel(), "compatibility")
-        options.addWidget(compatibility_label, 0, 0)
-        self.compat_combo = QComboBox()
-        self.compat_combo.addItem(self._t("compat_current"), "current-smp")
-        self.compat_combo.addItem(self._t("compat_patched"), "patched-smp")
-        self.compat_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
-        options.addWidget(self.compat_combo, 0, 1)
-        dlc_label = self._bind_text(QLabel(), "dlc")
-        options.addWidget(dlc_label, 0, 2)
-        self.dlc_combo = QComboBox()
-        self.dlc_combo.addItem(self._t("dlc_auto"), "auto")
-        self.dlc_combo.addItem(self._t("dlc_separate"), "separate")
-        self.dlc_combo.addItem(self._t("dlc_off"), "off")
-        self.dlc_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
-        options.addWidget(self.dlc_combo, 0, 3)
         self.resume_check = self._bind_text(QCheckBox(), "resume")
         self.resume_check.setChecked(True)
         self.force_check = self._bind_text(QCheckBox(), "force")
         self.keep_inner_check = self._bind_text(QCheckBox(), "keep_inner")
-        options.addWidget(self.resume_check, 1, 1)
-        options.addWidget(self.force_check, 1, 2)
-        options.addWidget(self.keep_inner_check, 1, 3)
+        options.addWidget(self.resume_check, 1, 0)
+        options.addWidget(self.force_check, 1, 1)
+        options.addWidget(self.keep_inner_check, 1, 2)
+        compression_label = self._bind_text(QLabel(), "compression")
+        options.addWidget(compression_label, 0, 0)
+        self.compression_combo = QComboBox()
+        for level in range(0, 10):
+            self.compression_combo.addItem(
+                self._compression_level_text(level),
+                level,
+            )
+        self.compression_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToContents
+        )
+        self.compression_combo.currentIndexChanged.connect(
+            self._compression_level_changed
+        )
+        options.addWidget(self.compression_combo, 0, 1)
+        self.compression_threads_label = QLabel()
+        self.compression_threads_label.setObjectName("summary")
+        options.addWidget(self.compression_threads_label, 0, 2, 1, 2)
+        self._update_compression_text()
         options.setColumnStretch(4, 1)
         page.addLayout(options)
 
@@ -788,11 +797,39 @@ class MainWindow(QMainWindow):
         temp = self.settings.value(
             "temp_dir", str(default_temporary_directory()), type=str
         )
-        self.temp_dir = Path(temp).expanduser()
+        restored_temp = Path(temp).expanduser()
+        try:
+            used_legacy_application_data_default = (
+                restored_temp.resolve() == self.root.resolve()
+            )
+        except OSError:
+            used_legacy_application_data_default = False
+        self.temp_dir = (
+            default_temporary_directory()
+            if used_legacy_application_data_default
+            else restored_temp
+        )
+        if used_legacy_application_data_default:
+            self.settings.setValue("temp_dir", str(self.temp_dir))
         folder = self.settings.value("source_folder", "", type=str)
         if folder and Path(folder).is_dir():
             self.source_mode = "folder"
             self.source_folder = Path(folder)
+        stored_compression_level = self.settings.value(
+            "compression_level",
+            7,
+            type=int,
+        )
+        if not 0 <= stored_compression_level <= 9:
+            stored_compression_level = 7
+        compression_index = self.compression_combo.findData(
+            stored_compression_level
+        )
+        self.compression_combo.setCurrentIndex(
+            compression_index
+            if compression_index >= 0
+            else self.compression_combo.findData(7)
+        )
         geometry = self.settings.value("window_geometry")
         if geometry is not None:
             self.restoreGeometry(geometry)
@@ -804,7 +841,16 @@ class MainWindow(QMainWindow):
         self.settings.setValue(
             "source_folder", str(self.source_folder) if self.source_folder else ""
         )
+        self.settings.setValue(
+            "compression_level",
+            int(self.compression_combo.currentData()),
+        )
         self.settings.setValue("window_geometry", self.saveGeometry())
+
+    def _compression_level_changed(self, _index: int) -> None:
+        level = self.compression_combo.currentData()
+        if level is not None:
+            self.settings.setValue("compression_level", int(level))
 
     def _choose_files(self) -> None:
         start = str(self.source_folder or self.root / "pkg")
@@ -935,19 +981,28 @@ class MainWindow(QMainWindow):
             self.language,
         )
 
-    def _base_arguments(self) -> list[str]:
+    def _base_arguments(
+        self,
+        source_arguments: list[str] | None = None,
+    ) -> list[str]:
         arguments = [
             "--output-dir",
             str(self.output_dir.resolve()),
             "--compat",
-            str(self.compat_combo.currentData()),
+            "current-smp",
             "--include-dlc",
-            str(self.dlc_combo.currentData()),
+            "auto",
+            "--compression-level",
+            str(self.compression_combo.currentData()),
             "--console-log",
             "--json",
         ]
         arguments.extend(temporary_cli_arguments(self.temp_dir))
-        arguments.extend(self._source_arguments())
+        arguments.extend(
+            source_arguments
+            if source_arguments is not None
+            else self._source_arguments()
+        )
         if self.resume_check.isChecked():
             arguments.append("--resume")
         else:
@@ -1237,11 +1292,19 @@ class MainWindow(QMainWindow):
 
     def _start_build(self) -> None:
         selected: list[str] = []
+        selected_packages: dict[str, tuple[Path, ...]] = {}
         for index in range(self.games_tree.topLevelItemCount()):
             item = self.games_tree.topLevelItem(index)
             title_id = item.data(0, Qt.ItemDataRole.UserRole)
-            if title_id and item.checkState(0) == Qt.CheckState.Checked:
-                selected.append(str(title_id))
+            if (
+                title_id
+                and item.checkState(0) != Qt.CheckState.Unchecked
+            ):
+                package_paths = self._checked_package_paths(item)
+                if package_paths:
+                    title_text = str(title_id)
+                    selected.append(title_text)
+                    selected_packages[title_text] = package_paths
         if not selected:
             blocked: list[str] = []
             if self.inventory:
@@ -1272,6 +1335,7 @@ class MainWindow(QMainWindow):
             self._show_error(self._t("check_paths"), str(error))
             return
         self.build_queue = selected
+        self.selected_packages_by_title = selected_packages
         self.build_results = {}
         self.build_total_count = len(selected)
         self.current_build_title = None
@@ -1294,9 +1358,20 @@ class MainWindow(QMainWindow):
             0, "build_preparing", title=title_id
         )
         self._append_log(self._t("build_flow", title=title_id))
+        package_paths = self.selected_packages_by_title.get(title_id, ())
+        source_arguments = source_cli_arguments(
+            "files",
+            package_paths,
+            None,
+            self.language,
+        )
         self._start_process(
             f"build:{title_id}",
-            ["build", title_id, *self._base_arguments()],
+            [
+                "build",
+                title_id,
+                *self._base_arguments(source_arguments),
+            ],
         )
 
     def _start_process(self, operation: str, arguments: list[str]) -> None:
@@ -1447,7 +1522,36 @@ class MainWindow(QMainWindow):
             )
         )
 
-    def _populate_inventory(self) -> None:
+    def _package_check_state(self) -> dict[str, bool]:
+        state: dict[str, bool] = {}
+        for top_index in range(self.games_tree.topLevelItemCount()):
+            top = self.games_tree.topLevelItem(top_index)
+            for child_index in range(top.childCount()):
+                child = top.child(child_index)
+                package_path = child.data(0, Qt.ItemDataRole.UserRole)
+                if package_path:
+                    state[str(package_path)] = (
+                        child.checkState(0) == Qt.CheckState.Checked
+                    )
+        return state
+
+    @staticmethod
+    def _checked_package_paths(item: QTreeWidgetItem) -> tuple[Path, ...]:
+        result: list[Path] = []
+        for child_index in range(item.childCount()):
+            child = item.child(child_index)
+            package_path = child.data(0, Qt.ItemDataRole.UserRole)
+            if (
+                package_path
+                and child.checkState(0) == Qt.CheckState.Checked
+            ):
+                result.append(Path(str(package_path)))
+        return tuple(result)
+
+    def _populate_inventory(
+        self,
+        package_check_state: dict[str, bool] | None = None,
+    ) -> None:
         self.games_tree.blockSignals(True)
         self.games_tree.clear()
         assert self.inventory is not None
@@ -1498,6 +1602,11 @@ class MainWindow(QMainWindow):
                 top.setToolTip(2, reason)
                 top.setText(2, f"{top.text(2)}  —  {reason}")
             else:
+                top.setFlags(
+                    top.flags()
+                    | Qt.ItemFlag.ItemIsUserCheckable
+                    | Qt.ItemFlag.ItemIsAutoTristate
+                )
                 top.setToolTip(
                     2,
                     self._t(
@@ -1527,6 +1636,30 @@ class MainWindow(QMainWindow):
                         ]
                     )
                     child.setToolTip(2, str(package.get("path", "")))
+                    package_path = str(package.get("path", ""))
+                    child.setData(
+                        0,
+                        Qt.ItemDataRole.UserRole,
+                        package_path,
+                    )
+                    child.setFlags(
+                        child.flags() | Qt.ItemFlag.ItemIsUserCheckable
+                    )
+                    checked_by_default = not bool(package.get("duplicate_of"))
+                    is_checked = (
+                        package_check_state.get(
+                            package_path,
+                            checked_by_default,
+                        )
+                        if package_check_state is not None
+                        else checked_by_default
+                    )
+                    child.setCheckState(
+                        0,
+                        Qt.CheckState.Checked
+                        if is_checked
+                        else Qt.CheckState.Unchecked,
+                    )
                     child.setToolTip(
                         6,
                         self._t(
@@ -1591,16 +1724,26 @@ class MainWindow(QMainWindow):
         if self.inventory is None:
             return
         selected_size = 0
-        games = self.inventory.get("games", {})
         for index in range(self.games_tree.topLevelItemCount()):
             item = self.games_tree.topLevelItem(index)
             title_id = item.data(0, Qt.ItemDataRole.UserRole)
-            if (
-                title_id
-                and item.checkState(0) == Qt.CheckState.Checked
-                and str(title_id) in games
-            ):
-                selected_size += game_source_size(games[str(title_id)])
+            if title_id and item.checkState(0) != Qt.CheckState.Unchecked:
+                selected_paths = {
+                    str(path.resolve())
+                    for path in self._checked_package_paths(item)
+                }
+                game = self.inventory.get("games", {}).get(str(title_id), {})
+                for package in [
+                    *game.get("base", []),
+                    *game.get("patches", []),
+                    *game.get("dlc", []),
+                    *game.get("unknown", []),
+                ]:
+                    if str(Path(package.get("path", "")).resolve()) in selected_paths:
+                        selected_size += max(
+                            0,
+                            int(package.get("size", 0) or 0),
+                        )
         summary = inventory_summary(self.inventory)
         self._set_summary(
             "inventory_summary",
@@ -1643,6 +1786,7 @@ class MainWindow(QMainWindow):
                 ),
             )
         self.build_queue = []
+        self.selected_packages_by_title = {}
         self.current_build_title = None
         self.current_build_stage = 0
         self._update_controls()
@@ -1652,6 +1796,7 @@ class MainWindow(QMainWindow):
             return
         self.cancel_requested = True
         self.build_queue = []
+        self.selected_packages_by_title = {}
         self._set_stage("cancelling")
         self._append_log(self._t("cancel_requested"))
         self.process.terminate()
@@ -1670,7 +1815,7 @@ class MainWindow(QMainWindow):
         return any(
             self.games_tree.topLevelItem(index).data(0, Qt.ItemDataRole.UserRole)
             and self.games_tree.topLevelItem(index).checkState(0)
-            == Qt.CheckState.Checked
+            != Qt.CheckState.Unchecked
             for index in range(self.games_tree.topLevelItemCount())
         )
 
@@ -1691,8 +1836,7 @@ class MainWindow(QMainWindow):
         self.cancel_button.setEnabled(running)
         self.reveal_button.setEnabled(self.output_dir.is_dir() and not running)
         self.games_tree.setEnabled(not running)
-        self.compat_combo.setEnabled(not running)
-        self.dlc_combo.setEnabled(not running)
+        self.compression_combo.setEnabled(not running)
         self.resume_check.setEnabled(not running)
         self.force_check.setEnabled(not running)
         self.keep_inner_check.setEnabled(not running)

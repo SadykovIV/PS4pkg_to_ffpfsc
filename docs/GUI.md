@@ -34,9 +34,16 @@ immediately. It does not perform a full source-file hash pass.
 4. Scan. The tree groups BASE, PATCH and DLC packages by TITLE_ID and shows
    conflicts or unsupported packages without selecting them for a build. A
    dedicated size column shows every PKG, the approximate total source size of
-   each game, and the summary shows the total size of checked games.
-5. Keep or clear the check mark beside every buildable game.
-6. Choose compatibility and DLC policy, then build.
+   each game, and the summary shows the total size of checked packages.
+5. Keep or clear the check mark beside each individual PKG. All supported
+   packages are checked by default. Exact copies identified by the PKG's
+   embedded package digest are shown as duplicates and unchecked by default;
+   split `part1`/`part2` packages with different digests remain checked.
+6. Choose the FFPFSC compression level, then build. Levels 0 through 9 are
+   available and level 7 is the default. Level 0 disables deflate compression.
+   The selected value is saved for the next launch. MkPFS uses all logical CPUs
+   available to the application; the detected worker count is shown beside the
+   selector.
 
 When packages were found but no game is buildable, the primary action remains
 enabled as **Check readiness** / **Проверить готовность**. It lists the actual
@@ -59,6 +66,13 @@ game if one build fails.
 after three seconds. A later run can reuse verified extraction state when
 **Resume interrupted work** is enabled.
 
+Before extracting, resume performs a metadata-only check of each previously
+completed package tree (relative paths, sizes and modification times). Matching
+trees are reused without opening their payload files, and only missing,
+changed, or previously failed PKGs are extracted. The per-package state is
+saved after every successful extraction and can also be recovered from the
+current manifest.
+
 The merge prefers same-filesystem hardlinks over full copies and falls back
 automatically on filesystems that do not support them. Extracted package trees
 are removed after the merged tree is verified. A successful build removes its
@@ -75,7 +89,7 @@ directory, so the indicator does not introduce extra payload reads or copies.
 ## Launch and packaging
 
 Download and completely extract
-`PS4-FFPFSC-v0.2.4-windows-x64.zip`, then launch `PS4 FFPFSC.exe`. The
+`PS4-FFPFSC-v0.2.5-windows-x64.zip`, then launch `PS4 FFPFSC.exe`. The
 accompanying `_internal` directory and `ps4ffpsc-worker.exe` are required parts
 of the self-contained application.
 

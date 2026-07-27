@@ -92,6 +92,42 @@ def _validate_record(record: dict[str, Any]) -> list[str]:
     return errors
 
 
+def _fast_duplicate_key(record: dict[str, Any]) -> tuple[Any, ...] | None:
+    package_digest = str(record.get("package_digest") or "").lower()
+    if (
+        re.fullmatch(r"[0-9a-f]{64}", package_digest) is None
+        or not package_digest.strip("0")
+    ):
+        return None
+    return (
+        package_digest,
+        record.get("kind"),
+        record.get("title_id"),
+        record.get("category"),
+        record.get("content_id"),
+        record.get("app_version"),
+        record.get("version"),
+        record.get("system_version"),
+        record.get("entitlement_label"),
+        int(record.get("size", 0) or 0),
+        tuple(sorted(str(flag) for flag in record.get("pkg_flags", []))),
+    )
+
+
+def _mark_fast_duplicates(packages: list[dict[str, Any]]) -> None:
+    canonical_by_metadata: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for package in packages:
+        key = _fast_duplicate_key(package)
+        if key is None:
+            continue
+        canonical = canonical_by_metadata.get(key)
+        if canonical is None:
+            canonical_by_metadata[key] = package
+            continue
+        package["duplicate_of"] = canonical["path"]
+        package["duplicate_match"] = "package_digest_metadata_and_size"
+
+
 def scan_packages(
     root: Path,
     pkg_dir: Path,
@@ -168,7 +204,12 @@ def scan_packages(
     for title_id, game in games.items():
         title = game["title"] or title_id
         game["directory_name"] = f"{title_id} - {sanitize_component(title, title_id)}"
-        unique_bases = game["base"]
+        for key in ("base", "patches", "dlc", "unknown"):
+            _mark_fast_duplicates(game[key])
+
+        unique_bases = [
+            item for item in game["base"] if not item.get("duplicate_of")
+        ]
         if len(unique_bases) > 1:
             game["conflicts"].append("conflicting_base_packages")
         if not unique_bases:
@@ -178,14 +219,29 @@ def scan_packages(
 
         base_content = unique_bases[0].get("content_id", "") if len(unique_bases) == 1 else ""
         base_region = content_id_parts(base_content)
-        for item in [*game["patches"], *game["dlc"]]:
+        for item in [
+            *(
+                package
+                for package in game["patches"]
+                if not package.get("duplicate_of")
+            ),
+            *(
+                package
+                for package in game["dlc"]
+                if not package.get("duplicate_of")
+            ),
+        ]:
             parts = content_id_parts(item.get("content_id", ""))
             if base_region and parts and parts[:2] != base_region[:2]:
                 item.setdefault("validation_errors", []).append("region_or_content_mismatch")
                 game["conflicts"].append("incompatible_package")
 
         versions: dict[str, str] = {}
-        for patch in game["patches"]:
+        for patch in (
+            item
+            for item in game["patches"]
+            if not item.get("duplicate_of")
+        ):
             version = patch.get("app_version", "")
             identity = patch["source_id"]
             previous = versions.get(version)

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from .inventory import find_extractor, inspect_package, scan_packages
-from .runtime import is_frozen
+from .runtime import is_frozen, maximum_logical_cpu_count
 from .sfo import build_param_json, choose_title, parse_sfo, validate_shadowmount_param_json
 from .util import (
     atomic_write_json,
@@ -50,6 +50,7 @@ class Settings:
     compat: str = "current-smp"
     include_dlc: str = "auto"
     jobs: int = 2
+    compression_level: int = 7
     resume: bool = True
     force: bool = False
     dry_run: bool = False
@@ -82,6 +83,12 @@ class Settings:
         temp_path = Path(temp_raw).expanduser() if temp_raw else resolve("work_dir", "work") / "tmp"
         if not temp_path.is_absolute():
             temp_path = (root / temp_path).resolve()
+        compression_level_value = getattr(args, "compression_level", None)
+        if compression_level_value is None:
+            compression_level_value = pack.get("compression_level", 7)
+        compression_level = int(compression_level_value)
+        if not 0 <= compression_level <= 9:
+            raise ValueError("compression level must be within 0..9")
         return cls(
             root=root,
             pkg_dir=resolve("pkg_dir", "pkg"),
@@ -92,6 +99,7 @@ class Settings:
             compat=getattr(args, "compat", None) or shadow.get("compatibility", "current-smp"),
             include_dlc=getattr(args, "include_dlc", None) or shadow.get("include_dlc", "auto"),
             jobs=max(1, int(getattr(args, "jobs", None) or extract.get("jobs", 2))),
+            compression_level=compression_level,
             resume=bool(
                 getattr(args, "resume", False)
                 or (extract.get("resume", True) and not getattr(args, "no_resume", False))
@@ -221,15 +229,62 @@ def check_disk_space(path: Path, required: int) -> None:
         )
 
 
+def _recover_state_from_manifest(root: Path) -> dict[str, Any] | None:
+    manifest_path = root / "manifest.json"
+    if not manifest_path.is_file():
+        return None
+    try:
+        manifest = read_json(manifest_path)
+        if manifest.get("extractor_revision") != EXTRACTOR_REVISION:
+            return None
+        packages: dict[str, dict[str, Any]] = {}
+        for record in manifest.get("extractions", []):
+            source_id = record.get("source_id")
+            destination_value = record.get("destination")
+            if (
+                record.get("status") != "verified"
+                or not source_id
+                or not destination_value
+                or not record.get("tree_signature")
+            ):
+                continue
+            destination = Path(destination_value)
+            ensure_within(root, destination)
+            if destination.is_dir():
+                packages[str(source_id)] = dict(record)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+    if not packages:
+        return None
+    LOG.info(
+        "recovered resumable extraction state from manifest: %d package(s)",
+        len(packages),
+    )
+    return {
+        "schema_version": EXTRACTION_STATE_SCHEMA_VERSION,
+        "extractor_revision": EXTRACTOR_REVISION,
+        "packages": packages,
+        "updated_at": utc_now(),
+    }
+
+
 def _load_state(root: Path) -> dict[str, Any]:
     path = root / ".ps4ffpsc-state.json"
     if path.exists():
-        state = read_json(path)
-        if (
-            state.get("schema_version") == EXTRACTION_STATE_SCHEMA_VERSION
-            and state.get("extractor_revision") == EXTRACTOR_REVISION
-        ):
-            return state
+        try:
+            state = read_json(path)
+            if (
+                state.get("schema_version") == EXTRACTION_STATE_SCHEMA_VERSION
+                and state.get("extractor_revision") == EXTRACTOR_REVISION
+                and isinstance(state.get("packages"), dict)
+            ):
+                return state
+        except (AttributeError, OSError, TypeError, ValueError):
+            LOG.warning("could not read extraction state; checking manifest: %s", path)
+        recovered = _recover_state_from_manifest(root)
+        if recovered is not None:
+            _save_state(root, recovered)
+            return recovered
         packages = root / "packages"
         if packages.exists():
             safe_remove_tree(packages, root)
@@ -237,6 +292,11 @@ def _load_state(root: Path) -> dict[str, Any]:
             "discarded extraction state created by an older PKG extractor: %s",
             path,
         )
+    else:
+        recovered = _recover_state_from_manifest(root)
+        if recovered is not None:
+            _save_state(root, recovered)
+            return recovered
     return {
         "schema_version": EXTRACTION_STATE_SCHEMA_VERSION,
         "extractor_revision": EXTRACTOR_REVISION,
@@ -267,6 +327,32 @@ def _refresh_package_source_identity(package: dict[str, Any]) -> str:
     return current
 
 
+def _verified_resumable_extraction(
+    saved: dict[str, Any] | None,
+    destination: Path,
+) -> dict[str, Any] | None:
+    if (
+        not isinstance(saved, dict)
+        or saved.get("status") != "verified"
+        or not destination.is_dir()
+        or not saved.get("tree_signature")
+    ):
+        return None
+    saved_destination = saved.get("destination")
+    if saved_destination:
+        try:
+            if Path(saved_destination).resolve() != destination.resolve():
+                return None
+        except OSError:
+            return None
+    try:
+        if tree_stat_signature(destination) != saved.get("tree_signature"):
+            return None
+    except (OSError, TypeError, ValueError):
+        return None
+    return saved
+
+
 def unpack_game(settings: Settings, inventory: dict[str, Any], title_id: str) -> dict[str, Any]:
     game = game_or_raise(inventory, title_id)
     if not game["buildable"]:
@@ -281,9 +367,35 @@ def unpack_game(settings: Settings, inventory: dict[str, Any], title_id: str) ->
     selected = candidates
     for package in selected:
         _refresh_package_source_identity(package)
-    check_disk_space(settings.temp_dir, _disk_required(selected, 1.25))
-    extractor = extractor_or_raise(settings)
     state = _load_state(root)
+    LOG.info(
+        "fast-checking temporary extraction metadata for %d package(s)",
+        len(selected),
+    )
+    resumed: dict[str, dict[str, Any]] = {}
+    pending: list[dict[str, Any]] = []
+    for package in selected:
+        destination = package_destination(root, package)
+        package["extracted_path"] = str(destination)
+        source_id = package["source_id"]
+        saved = state["packages"].get(source_id)
+        reusable = (
+            _verified_resumable_extraction(saved, destination)
+            if settings.resume and not settings.force
+            else None
+        )
+        if reusable is not None:
+            resumed[source_id] = reusable
+        else:
+            pending.append(package)
+    LOG.info(
+        "resume preflight: %d verified package(s) reusable, %d package(s) pending",
+        len(resumed),
+        len(pending),
+    )
+    if pending:
+        check_disk_space(settings.temp_dir, _disk_required(pending, 1.25))
+    extractor = extractor_or_raise(settings) if pending else None
     results: list[dict[str, Any]] = []
 
     selected_total = len(selected)
@@ -296,15 +408,9 @@ def unpack_game(settings: Settings, inventory: dict[str, Any], title_id: str) ->
         package["extracted_path"] = str(destination)
         source_id = package["source_id"]
         saved = state["packages"].get(source_id)
-        if (
-            settings.resume
-            and saved
-            and saved.get("status") == "verified"
-            and destination.is_dir()
-            and saved.get("tree_signature")
-            and tree_stat_signature(destination) == saved.get("tree_signature")
-        ):
-            results.append(saved)
+        reusable = resumed.get(source_id)
+        if reusable is not None:
+            results.append(reusable)
             LOG.info("resume: verified package already extracted: %s", package["path"])
             completed_source += package_source_size
             _emit_gui_progress(
@@ -426,6 +532,8 @@ def unpack_game(settings: Settings, inventory: dict[str, Any], title_id: str) ->
             "status": "verified",
             "source_path": package["path"],
             "source_id": source_id,
+            "source_size": package.get("size"),
+            "source_mtime_ns": package.get("source_mtime_ns"),
             "destination": str(destination),
             "tree_signature": signature,
             "file_count": len(manifest),
@@ -873,6 +981,26 @@ def mkpfs_command(settings: Settings) -> list[str]:
     raise RuntimeError("official MkPFS is not installed; run scripts/bootstrap_macos.sh")
 
 
+def mkpfs_compression_arguments(
+    settings: Settings,
+    worker_count: int | None = None,
+) -> list[str]:
+    level = int(settings.compression_level)
+    if not 0 <= level <= 9:
+        raise ValueError("compression level must be within 0..9")
+    workers = (
+        maximum_logical_cpu_count()
+        if worker_count is None
+        else max(1, int(worker_count))
+    )
+    return [
+        "--cpu-count",
+        str(workers),
+        "--compression-level",
+        str(level),
+    ]
+
+
 def _run_captured(
     command: list[str],
     *,
@@ -1027,6 +1155,7 @@ def _pack_dlc_separate(
     merged_root: Path,
     mkpfs: list[str],
     log_path: Path,
+    compression_workers: int,
 ) -> list[dict[str, Any]]:
     artifacts: list[dict[str, Any]] = []
     for item in (entry for entry in game["dlc"] if not entry.get("duplicate_of")):
@@ -1047,8 +1176,7 @@ def _pack_dlc_separate(
             "PS5",
             "--inode-bits",
             "32",
-            "--cpu-count",
-            str(settings.jobs),
+            *mkpfs_compression_arguments(settings, compression_workers),
             "--temp-folder",
             str(settings.temp_dir),
             str(source),
@@ -1077,6 +1205,8 @@ def _pack_dlc_separate(
                 "checksum_generated": False,
                 "entitlement_label": label,
                 "runtime_supported": False,
+                "compression_level": settings.compression_level,
+                "compression_workers": compression_workers,
                 "verification": verification,
             }
         )
@@ -1141,6 +1271,16 @@ def build_game(
         partial.unlink()
     mkpfs = mkpfs_command(settings)
     log_path = settings.root / "logs" / "ps4ffpsc.log"
+    compression_workers = maximum_logical_cpu_count()
+    compression_arguments = mkpfs_compression_arguments(
+        settings,
+        compression_workers,
+    )
+    LOG.info(
+        "MkPFS compression: level %d, workers %d (all available logical CPUs)",
+        settings.compression_level,
+        compression_workers,
+    )
     inner_image: Path | None = None
     if settings.keep_inner_image:
         inner_image = output.with_name(f"{output.stem}.inner.exfat")
@@ -1174,8 +1314,7 @@ def build_game(
             "PS5",
             "--inode-bits",
             "32",
-            "--cpu-count",
-            str(settings.jobs),
+            *compression_arguments,
             "--temp-folder",
             str(settings.temp_dir),
             str(inner_image),
@@ -1191,8 +1330,7 @@ def build_game(
             "PS5",
             "--inode-bits",
             "32",
-            "--cpu-count",
-            str(settings.jobs),
+            *compression_arguments,
             "--temp-folder",
             str(settings.temp_dir),
         ]
@@ -1208,7 +1346,14 @@ def build_game(
     os.replace(partial, output)
     dlc_artifacts: list[dict[str, Any]] = []
     if settings.include_dlc == "separate" and game["dlc"]:
-        dlc_artifacts = _pack_dlc_separate(settings, game, root / "merged", mkpfs, log_path)
+        dlc_artifacts = _pack_dlc_separate(
+            settings,
+            game,
+            root / "merged",
+            mkpfs,
+            log_path,
+            compression_workers,
+        )
     LOG.info("stage 5/5: publishing output and cleaning temporary files")
     checksum_path = output.with_name(f"{output.name}.sha256")
     if checksum_path.exists():
@@ -1240,6 +1385,9 @@ def build_game(
         "inner_filesystem": "exfat",
         "kept_inner_image": str(inner_image) if inner_image else None,
         "outer_container": "compressed_pfs",
+        "compression_level": settings.compression_level,
+        "compression_workers": compression_workers,
+        "compression_workers_mode": "maximum_available_logical_cpus",
         "extra_top_level_directory": False,
         "verification": verification,
         "static_shadowmount_compatible": settings.compat == "current-smp",
@@ -1281,6 +1429,8 @@ def build_game(
                     or "none"
                 ),
                 f"Compatibility: {settings.compat}",
+                f"Compression level: {settings.compression_level}",
+                f"Compression workers: {compression_workers} (maximum available logical CPUs)",
                 "Recommended USB path: /mnt/usb0/ps4ffpsc/" + output.name,
                 "manual.lst: /mnt/usb0/ps4ffpsc/" + output.name,
                 "Expected ShadowMountPlus checks: nested exFAT mount, root sce_sys/param.json, "

@@ -1,6 +1,6 @@
 [project]
 name = "ps4ffpsc"
-version = "0.2.4"
+version = "0.2.5"
 requires-python = ">=3.11"
 description = "Safe PS4 PKG to ShadowMountPlus FFPFSC pipeline"
 license = "GPL-3.0-or-later"

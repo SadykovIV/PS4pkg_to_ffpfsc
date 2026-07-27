@@ -57,7 +57,26 @@ def temporary_workspace(temp_dir: Path) -> Path:
 def default_temporary_directory() -> Path:
     if sys.platform == "darwin":
         return Path("/tmp")
+    if sys.platform == "win32":
+        windows_temp = os.environ.get("TEMP")
+        if windows_temp:
+            return Path(windows_temp).expanduser().resolve()
     return Path(tempfile.gettempdir())
+
+
+def maximum_logical_cpu_count() -> int:
+    process_cpu_count = getattr(os, "process_cpu_count", None)
+    count = process_cpu_count() if callable(process_cpu_count) else None
+    if count is None:
+        get_affinity = getattr(os, "sched_getaffinity", None)
+        if callable(get_affinity):
+            try:
+                count = len(get_affinity(0))
+            except OSError:
+                count = None
+    if count is None:
+        count = os.cpu_count()
+    return max(1, int(count or 1))
 
 
 def ensure_application_directories(root: Path) -> None:

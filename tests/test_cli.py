@@ -6,6 +6,23 @@ from ps4ffpsc import cli
 from ps4ffpsc.pipeline import Settings
 
 
+def test_build_parser_accepts_full_mkpfs_compression_range(
+    tmp_path: Path,
+) -> None:
+    parser = cli.build_parser()
+
+    args = parser.parse_args(
+        ["build", "CUSA12345", "--compression-level", "9"]
+    )
+    assert args.compression_level == 9
+
+    no_deflate_args = parser.parse_args(
+        ["build", "CUSA12345", "--compression-level", "0"]
+    )
+    settings = Settings.load(tmp_path, no_deflate_args, tmp_path)
+    assert settings.compression_level == 0
+
+
 def test_build_reuses_inventory_from_initial_scan(
     monkeypatch,
     tmp_path: Path,
