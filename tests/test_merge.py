@@ -4,12 +4,11 @@ from pathlib import Path
 
 from ps4ffpsc.pipeline import (
     Settings,
-    _deduplicate_packages_by_sha,
     merge_game,
     package_destination,
 )
 from ps4ffpsc.sfo import make_sfo, parse_sfo, validate_shadowmount_param_json
-from ps4ffpsc.util import atomic_write_json, sha256_file
+from ps4ffpsc.util import atomic_write_json
 
 
 def _settings(root: Path) -> Settings:
@@ -26,7 +25,7 @@ def _settings(root: Path) -> Settings:
 def _pkg(kind: str, sha: str, version: str) -> dict:
     return {
         "kind": kind,
-        "sha256": sha,
+        "source_id": "stat-" + sha,
         "app_version": version,
         "path": f"/mock/{sha}.pkg",
         "pkg_flags": ["DELTA_PATCH"] if kind == "patch" else [],
@@ -65,9 +64,6 @@ def test_synthetic_base_patch_overlay_and_param_json(tmp_path: Path) -> None:
     (patch_dir / "sce_sys" / "param.sfo").write_bytes(
         make_sfo({"TITLE_ID": "CUSA12345", "TITLE": "Игра", "APP_VER": "01.10", "CATEGORY": "gp"})
     )
-    previous_data_sha = sha256_file(base_dir / "data.bin")
-    patched_data_sha = sha256_file(patch_dir / "data.bin")
-
     report = merge_game(settings, inventory, "CUSA12345")
     merged = root / "merged" / "app"
     assert (merged / "data.bin").read_bytes() == b"new"
@@ -76,8 +72,8 @@ def test_synthetic_base_patch_overlay_and_param_json(tmp_path: Path) -> None:
         (merged / "sce_sys" / "param.json").read_bytes(), "CUSA12345"
     )
     replacement = next(item for item in report["overlay_changes"] if item["path"] == "data.bin")
-    assert replacement["previous_sha256"] == previous_data_sha
-    assert replacement["new_sha256"] == patched_data_sha
+    assert replacement["previous_size"] == 3
+    assert replacement["new_size"] == 3
     assert report["delta_patch_warning"]
     assert not report["ps5_runtime_verified"]
 
@@ -142,15 +138,3 @@ def test_patch_can_replace_path_with_case_only_name_change(tmp_path: Path) -> No
         if item["path"] == "Media/Modules/Il2cppUserAssemblies.prx"
     )
     assert rename["case_renamed_from"] == "Media/Modules/Il2CppUserAssemblies.prx"
-
-
-def test_byte_identical_pkg_is_marked_as_duplicate() -> None:
-    first = _pkg("dlc", "e" * 64, "01.00")
-    first["path"] = "/mock/first.pkg"
-    second = _pkg("dlc", "e" * 64, "01.00")
-    second["path"] = "/mock/second.pkg"
-
-    selected = _deduplicate_packages_by_sha([first, second])
-
-    assert selected == [first]
-    assert second["duplicate_of"] == first["path"]

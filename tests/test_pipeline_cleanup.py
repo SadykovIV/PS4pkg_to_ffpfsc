@@ -8,7 +8,12 @@ import pytest
 from ps4ffpsc import pipeline
 from ps4ffpsc.pipeline import Settings, _resume_merged_game, build_game
 from ps4ffpsc.sfo import build_param_json, make_sfo
-from ps4ffpsc.util import atomic_write_json, read_json, sha256_file, tree_sha256
+from ps4ffpsc.util import (
+    atomic_write_json,
+    file_stat_identity,
+    read_json,
+    tree_stat_signature,
+)
 
 
 def _settings(root: Path) -> Settings:
@@ -57,7 +62,7 @@ def _prepare_fake_pipeline(
     def fake_unpack(
         _settings: Settings, _inventory: dict, _title_id: str
     ) -> dict:
-        base["sha256"] = "a" * 64
+        base["source_id"] = file_stat_identity(Path(base["path"]))
         extracted = root / "packages" / "base" / "aaaaaaaaaaaa"
         extracted.mkdir(parents=True)
         (extracted / "large.bin").write_bytes(b"temporary")
@@ -115,6 +120,13 @@ def test_successful_build_removes_only_its_temporary_workspace(
         "_verify_image",
         lambda *_args, **_kwargs: {"verified": True},
     )
+    monkeypatch.setattr(
+        pipeline,
+        "sha256_file",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("normal build must not hash file payloads")
+        ),
+    )
 
     result = build_game(settings, "CUSA12345", inventory)
 
@@ -123,6 +135,9 @@ def test_successful_build_removes_only_its_temporary_workspace(
     assert source.read_bytes() == b"owned source"
     assert not root.exists()
     assert result["temporary_workspace_cleaned"] is True
+    assert result["sha256"] is None
+    assert result["checksum_generated"] is False
+    assert not output.with_name(f"{output.name}.sha256").exists()
     assert read_json(output.with_suffix(".manifest.json"))[
         "temporary_workspace_cleaned"
     ] is True
@@ -166,8 +181,59 @@ def test_output_inside_game_workspace_is_rejected_before_cleanup(
     assert source.read_bytes() == b"owned source"
 
 
+def test_unpack_does_not_hash_source_or_extracted_payloads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path)
+    source = tmp_path / "source.pkg"
+    source.write_bytes(b"large source placeholder")
+    inventory = _inventory(source)
+    monkeypatch.setattr(pipeline, "check_disk_space", lambda *_args: None)
+    monkeypatch.setattr(
+        pipeline, "extractor_or_raise", lambda *_args: tmp_path / "extractor"
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "sha256_file",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("normal extraction must not hash file payloads")
+        ),
+    )
+
+    def fake_extract(
+        command: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        destination = Path(command[command.index("--output") + 1])
+        destination.mkdir(parents=True)
+        (destination / "payload.bin").write_bytes(b"extracted")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(pipeline, "_run_captured", fake_extract)
+
+    manifest = pipeline.unpack_game(settings, inventory, "CUSA12345")
+
+    package = manifest["packages"][0]
+    assert package["source_id"].startswith("stat-")
+    assert "sha256" not in package
+    assert manifest["extractions"][0]["tree_signature"].startswith("stat-")
+
+
+def test_unpack_rejects_pkg_changed_after_fast_metadata_scan(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    source = tmp_path / "source.pkg"
+    source.write_bytes(b"original")
+    inventory = _inventory(source)
+    inventory["games"]["CUSA12345"]["base"][0]["source_id"] = file_stat_identity(
+        source
+    )
+    source.write_bytes(b"changed and larger")
+
+    with pytest.raises(RuntimeError, match="changed after scanning"):
+        pipeline.unpack_game(settings, inventory, "CUSA12345")
+
+
 def test_verified_merged_workspace_can_resume_without_extracted_packages(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     settings = _settings(tmp_path)
     source = tmp_path / "source.pkg"
@@ -191,10 +257,10 @@ def test_verified_merged_workspace_can_resume_without_extracted_packages(
     (app / "sce_sys" / "param.json").write_bytes(
         build_param_json("CUSA12345", "Synthetic Game")
     )
-    source_sha = sha256_file(source)
+    source_id = file_stat_identity(source)
     atomic_write_json(
         root / "manifest.json",
-        {"packages": [{"path": str(source), "sha256": source_sha}]},
+        {"packages": [{"path": str(source), "source_id": source_id}]},
     )
     atomic_write_json(
         root / "reports" / "merge_report.json",
@@ -202,13 +268,20 @@ def test_verified_merged_workspace_can_resume_without_extracted_packages(
             "title_id": "CUSA12345",
             "compatibility": "current-smp",
             "latest_app_version": "01.00",
-            "merged_tree_sha256": tree_sha256(app),
+            "merged_tree_signature": tree_stat_signature(app),
         },
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "sha256_file",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("resume must not read full file payloads")
+        ),
     )
 
     report = _resume_merged_game(settings, game, "CUSA12345")
 
     assert report is not None
     assert report["latest_app_version"] == "01.00"
-    assert game["base"][0]["sha256"] == source_sha
+    assert game["base"][0]["source_id"] == source_id
     assert not (root / "packages").exists()

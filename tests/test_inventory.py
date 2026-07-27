@@ -36,7 +36,9 @@ def test_find_extractor_accepts_bundled_windows_executable(tmp_path: Path) -> No
     assert find_extractor(tmp_path, resources) == extractor
 
 
-def test_duplicate_base_is_not_a_conflict(monkeypatch, tmp_path: Path) -> None:
+def test_two_base_paths_are_a_conflict_without_full_content_hashing(
+    monkeypatch, tmp_path: Path
+) -> None:
     pkg = tmp_path / "pkg"
     pkg.mkdir()
     files = [pkg / "a.pkg", pkg / "b.PKG"]
@@ -50,9 +52,10 @@ def test_duplicate_base_is_not_a_conflict(monkeypatch, tmp_path: Path) -> None:
     )
     result = scan_packages(tmp_path, pkg, tmp_path / "unpacked", tmp_path / "helper")
     game = result["games"]["CUSA12345"]
-    assert game["buildable"]
-    assert not game["conflicts"]
-    assert game["base"][1]["duplicate_of"].endswith("a.pkg")
+    assert not game["buildable"]
+    assert "conflicting_base_packages" in game["conflicts"]
+    assert all("sha256" not in item for item in game["base"])
+    assert all(item["source_id"].startswith("stat-") for item in game["base"])
 
 
 def test_conflicting_bases_and_orphan_patch(monkeypatch, tmp_path: Path) -> None:
@@ -85,9 +88,11 @@ def test_explicit_pkg_files_override_recursive_directory(monkeypatch, tmp_path: 
     ignored.write_bytes(b"ignored")
     selected.write_bytes(b"selected")
     visited: list[Path] = []
+    hash_modes: list[bool] = []
 
     def inspect(_extractor: Path, path: Path, compute_sha256: bool = False) -> dict:
         visited.append(path)
+        hash_modes.append(compute_sha256)
         return _record(path, "d" * 64, "base")
 
     monkeypatch.setattr(inventory_module, "inspect_package", inspect)
@@ -99,5 +104,6 @@ def test_explicit_pkg_files_override_recursive_directory(monkeypatch, tmp_path: 
         (selected,),
     )
     assert visited == [selected.resolve()]
+    assert hash_modes == [False]
     assert result["source_mode"] == "selected_files"
     assert result["selected_pkg_files"] == [str(selected.resolve())]

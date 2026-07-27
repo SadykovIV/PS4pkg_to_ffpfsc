@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import hashlib
 import logging
 import re
 import subprocess
@@ -11,6 +10,7 @@ from typing import Any
 from .util import (
     atomic_write_json,
     content_id_parts,
+    file_stat_identity,
     sanitize_component,
     utc_now,
     validate_title_id,
@@ -71,14 +71,6 @@ def inspect_package(
     return record
 
 
-def _scan_id(path: Path) -> str:
-    stat = path.stat()
-    material = f"{path.resolve()}\0{stat.st_size}\0{stat.st_mtime_ns}".encode(
-        "utf-8", errors="surrogateescape"
-    )
-    return "scan-" + hashlib.sha256(material).hexdigest()
-
-
 def _validate_record(record: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     if not validate_title_id(record.get("title_id", "")):
@@ -137,25 +129,21 @@ def scan_packages(
     packages: list[dict[str, Any]] = []
     games: dict[str, dict[str, Any]] = {}
     unsupported: list[dict[str, Any]] = []
-    seen_sha: dict[str, dict[str, Any]] = {}
-
     for path in files:
         LOG.info("inspecting PKG: %s", path)
         record = inspect_package(extractor, path, compute_sha256=False)
-        record["scan_id"] = _scan_id(path)
-        record["sha256_verified"] = bool(record.get("sha256"))
+        stat_result = path.stat()
+        record.pop("sha256", None)
+        record.pop("sha256_verified", None)
+        record.pop("duplicate_of", None)
+        record["source_id"] = file_stat_identity(path)
+        record["size"] = stat_result.st_size
+        record["source_mtime_ns"] = stat_result.st_mtime_ns
         record["validation_errors"] = _validate_record(record) if record.get("supported") else []
         if not record.get("supported"):
             unsupported.append(record)
             packages.append(record)
             continue
-        package_sha = record.get("sha256")
-        if package_sha:
-            duplicate = seen_sha.get(package_sha)
-            if duplicate:
-                record["duplicate_of"] = duplicate["path"]
-            else:
-                seen_sha[package_sha] = record
         packages.append(record)
 
         title_id = record["title_id"]
@@ -180,7 +168,7 @@ def scan_packages(
     for title_id, game in games.items():
         title = game["title"] or title_id
         game["directory_name"] = f"{title_id} - {sanitize_component(title, title_id)}"
-        unique_bases = [item for item in game["base"] if not item.get("duplicate_of")]
+        unique_bases = game["base"]
         if len(unique_bases) > 1:
             game["conflicts"].append("conflicting_base_packages")
         if not unique_bases:
@@ -199,7 +187,7 @@ def scan_packages(
         versions: dict[str, str] = {}
         for patch in game["patches"]:
             version = patch.get("app_version", "")
-            identity = patch.get("sha256") or patch["scan_id"]
+            identity = patch["source_id"]
             previous = versions.get(version)
             if previous and previous != identity:
                 game["conflicts"].append(f"conflicting_patch_version:{version}")

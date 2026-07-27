@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import hashlib
 import logging
 import os
 import platform
@@ -21,14 +20,14 @@ from .sfo import build_param_json, choose_title, parse_sfo, validate_shadowmount
 from .util import (
     atomic_write_json,
     ensure_within,
+    file_stat_identity,
     iter_tree_files,
     read_json,
     safe_remove_tree,
     sha256_file,
     stage_file_atomic,
-    tree_manifest,
-    tree_sha256,
-    tree_sha256_from_manifest,
+    tree_stat_manifest,
+    tree_stat_signature,
     utc_now,
     validate_title_id,
     version_key,
@@ -148,25 +147,6 @@ def _emit_gui_progress(scope: str, **payload: Any) -> None:
     )
 
 
-def _sha256_with_progress(path: Path, scope: str, **payload: Any) -> str:
-    last_percent = -1
-
-    def report(current: int, total: int) -> None:
-        nonlocal last_percent
-        percent = 100 if total == 0 else int(current * 100 / total)
-        if percent < 100 and percent < last_percent + 1:
-            return
-        last_percent = percent
-        _emit_gui_progress(
-            scope,
-            current=current,
-            total=max(total, 1),
-            **payload,
-        )
-
-    return sha256_file(path, progress=report if _gui_progress_enabled() else None)
-
-
 def extractor_or_raise(settings: Settings) -> Path:
     extractor = find_extractor(settings.root, settings.resource_root)
     if extractor is None:
@@ -205,10 +185,14 @@ def game_root(settings: Settings, game: dict[str, Any]) -> Path:
 
 
 def package_destination(root: Path, package: dict[str, Any]) -> Path:
-    identity = package.get("sha256") or package.get("scan_id")
+    identity = (
+        package.get("source_id")
+        or package.get("scan_id")
+        or package.get("sha256")
+    )
     if not identity:
         raise RuntimeError(f"package has no identity: {package.get('path')}")
-    short_hash = identity.removeprefix("scan-")[:12]
+    short_hash = identity.removeprefix("stat-").removeprefix("scan-")[:12]
     kind = package["kind"]
     if kind == "base":
         return root / "packages" / "base" / short_hash
@@ -238,8 +222,11 @@ def check_disk_space(path: Path, required: int) -> None:
 def _load_state(root: Path) -> dict[str, Any]:
     path = root / ".ps4ffpsc-state.json"
     if path.exists():
-        return read_json(path)
-    return {"schema_version": 1, "packages": {}, "updated_at": utc_now()}
+        state = read_json(path)
+        if state.get("schema_version") == 2:
+            return state
+        LOG.info("ignoring legacy hash-based extraction state: %s", path)
+    return {"schema_version": 2, "packages": {}, "updated_at": utc_now()}
 
 
 def _save_state(root: Path, state: dict[str, Any]) -> None:
@@ -247,28 +234,21 @@ def _save_state(root: Path, state: dict[str, Any]) -> None:
     atomic_write_json(root / ".ps4ffpsc-state.json", state)
 
 
-def _deduplicate_packages_by_sha(
-    packages: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    unique: list[dict[str, Any]] = []
-    seen: dict[str, dict[str, Any]] = {}
-    for package in packages:
-        package_sha = package.get("sha256")
-        if not package_sha:
-            raise RuntimeError(f"package SHA-256 is missing: {package.get('path')}")
-        duplicate = seen.get(package_sha)
-        if duplicate is not None:
-            package["duplicate_of"] = duplicate["path"]
-            LOG.warning(
-                "ignoring byte-identical duplicate PKG: %s (same as %s)",
-                package["path"],
-                duplicate["path"],
-            )
-            continue
-        package.pop("duplicate_of", None)
-        seen[package_sha] = package
-        unique.append(package)
-    return unique
+def _refresh_package_source_identity(package: dict[str, Any]) -> str:
+    source = Path(package["path"])
+    current = file_stat_identity(source)
+    previous = package.get("source_id") or package.get("scan_id")
+    if previous and previous.partition("-")[2] != current.partition("-")[2]:
+        raise RuntimeError(
+            f"source PKG changed after scanning; scan again: {source}"
+        )
+    stat_result = source.stat()
+    package["source_id"] = current
+    package["size"] = stat_result.st_size
+    package["source_mtime_ns"] = stat_result.st_mtime_ns
+    package.pop("sha256", None)
+    package.pop("sha256_verified", None)
+    return current
 
 
 def unpack_game(settings: Settings, inventory: dict[str, Any], title_id: str) -> dict[str, Any]:
@@ -282,21 +262,9 @@ def unpack_game(settings: Settings, inventory: dict[str, Any], title_id: str) ->
         for item in [*game["base"], *game["patches"], *game["dlc"]]
         if item.get("supported") and not item.get("duplicate_of")
     ]
-    candidate_total = len(candidates)
-    for package_index, package in enumerate(candidates, start=1):
-        if package.get("sha256"):
-            continue
-        source = Path(package["path"])
-        LOG.info("computing source SHA-256 before extraction: %s", source)
-        package["sha256"] = _sha256_with_progress(
-            source,
-            "source_hash",
-            package_index=package_index,
-            package_total=candidate_total,
-            package_name=source.name,
-        )
-        package["sha256_verified"] = True
-    selected = _deduplicate_packages_by_sha(candidates)
+    selected = candidates
+    for package in selected:
+        _refresh_package_source_identity(package)
     check_disk_space(settings.temp_dir, _disk_required(selected, 1.25))
     extractor = extractor_or_raise(settings)
     state = _load_state(root)
@@ -306,13 +274,15 @@ def unpack_game(settings: Settings, inventory: dict[str, Any], title_id: str) ->
     for package_index, package in enumerate(selected, start=1):
         destination = package_destination(root, package)
         package["extracted_path"] = str(destination)
-        saved = state["packages"].get(package["sha256"])
+        source_id = package["source_id"]
+        saved = state["packages"].get(source_id)
         if (
             settings.resume
             and saved
             and saved.get("status") == "verified"
             and destination.is_dir()
-            and tree_sha256(destination) == saved.get("tree_sha256")
+            and saved.get("tree_signature")
+            and tree_stat_signature(destination) == saved.get("tree_signature")
         ):
             results.append(saved)
             LOG.info("resume: verified package already extracted: %s", package["path"])
@@ -331,7 +301,7 @@ def unpack_game(settings: Settings, inventory: dict[str, Any], title_id: str) ->
         if destination.exists():
             safe_remove_tree(destination, root)
         if settings.dry_run:
-            results.append({"sha256": package["sha256"], "status": "dry_run"})
+            results.append({"source_id": source_id, "status": "dry_run"})
             continue
         partial.parent.mkdir(parents=True, exist_ok=True)
         command = [
@@ -372,7 +342,7 @@ def unpack_game(settings: Settings, inventory: dict[str, Any], title_id: str) ->
             forward_stderr=True,
         )
         if process.returncode != 0:
-            state["packages"][package["sha256"]] = {
+            state["packages"][source_id] = {
                 "status": "unsupported_or_encrypted_pkg"
                 if process.returncode == 3
                 else "failed",
@@ -387,18 +357,19 @@ def unpack_game(settings: Settings, inventory: dict[str, Any], title_id: str) ->
                 f"extractor failed ({process.returncode}) for {package['path']}: "
                 f"{process.stdout.strip() or process.stderr.strip()}"
             )
-        manifest = tree_manifest(partial)
-        digest = tree_sha256_from_manifest(manifest)
+        manifest = tree_stat_manifest(partial)
+        signature = tree_stat_signature(manifest)
         os.replace(partial, destination)
         record = {
             "status": "verified",
             "source_path": package["path"],
-            "sha256": package["sha256"],
+            "source_id": source_id,
             "destination": str(destination),
-            "tree_sha256": digest,
+            "tree_signature": signature,
             "file_count": len(manifest),
+            "total_size": sum(int(item["size"]) for item in manifest),
         }
-        state["packages"][package["sha256"]] = record
+        state["packages"][source_id] = record
         _save_state(root, state)
         results.append(record)
 
@@ -473,7 +444,12 @@ def _copy_overlay(
             LOG.warning("ignoring macOS host metadata in extracted tree: %s", source_file)
             continue
         folded = rel_text.casefold()
-        package_identity = package.get("sha256") or package.get("path", "")
+        package_identity = (
+            package.get("source_id")
+            or package.get("scan_id")
+            or package.get("sha256")
+            or package.get("path", "")
+        )
         previous = case_map.get(folded)
         case_renamed_from: str | None = None
         if previous is not None and previous[1] != rel_text:
@@ -493,10 +469,10 @@ def _copy_overlay(
         target = destination / relative
         ensure_within(destination, target)
         records_change = package.get("kind") != "base"
-        previous_hash = (
-            sha256_file(target) if records_change and target.exists() else None
+        previous_size = (
+            target.stat().st_size if records_change and target.exists() else None
         )
-        new_hash = sha256_file(source_file) if records_change else None
+        new_size = source_file.stat().st_size if records_change else None
         staging_mode = stage_file_atomic(
             source_file, target, consume_source=True
         )
@@ -506,14 +482,12 @@ def _copy_overlay(
             moved += 1
         else:
             copied += 1
-        if records_change and (
-            previous_hash != new_hash or case_renamed_from is not None
-        ):
+        if records_change:
             change = {
                 "path": rel_text,
-                "previous_sha256": previous_hash,
-                "new_sha256": new_hash,
-                "source_package": package["sha256"],
+                "previous_size": previous_size,
+                "new_size": new_size,
+                "source_package": package["source_id"],
                 "source_app_version": package.get("app_version"),
             }
             if case_renamed_from is not None:
@@ -633,7 +607,7 @@ def merge_game(
     dlc_reports: list[dict[str, Any]] = []
     dlc_labels: dict[str, dict[str, Any]] = {}
     for item in dlc:
-        label = item.get("entitlement_label") or f"UNKNOWN-{item['sha256'][:12]}"
+        label = item.get("entitlement_label") or f"UNKNOWN-{item['source_id'][-12:]}"
         previous_dlc = dlc_labels.get(label)
         if previous_dlc is not None:
             raise RuntimeError(
@@ -646,14 +620,16 @@ def merge_game(
         target.mkdir(parents=True)
         dlc_changes: list[dict[str, Any]] = []
         merge_package(source, target, item, dlc_changes, {})
+        dlc_manifest = tree_stat_manifest(target)
         metadata = {
             "title_id": title_id,
             "content_id": item.get("content_id"),
             "entitlement_label": label,
             "name": item.get("title"),
             "version": item.get("app_version") or item.get("version"),
-            "source_pkg_sha256": item["sha256"],
-            "extracted_tree_sha256": tree_sha256(target),
+            "source_pkg_id": item["source_id"],
+            "extracted_tree_signature": tree_stat_signature(dlc_manifest),
+            "extracted_file_count": len(dlc_manifest),
             "runtime_support_status": "packaged_not_runtime_verified",
         }
         atomic_write_json(target / "ps4ffpsc-dlc.json", metadata)
@@ -666,9 +642,10 @@ def merge_game(
         "title_id": title_id,
         "title": game["title"],
         "compatibility": compat,
-        "base_package": base[0]["sha256"],
+        "base_package": base[0]["source_id"],
         "patch_order": [
-            {"app_version": item["app_version"], "sha256": item["sha256"]} for item in patches
+            {"app_version": item["app_version"], "source_id": item["source_id"]}
+            for item in patches
         ],
         "latest_app_version": expected_version,
         "overlay_changes": changes,
@@ -692,7 +669,7 @@ def merge_game(
             else "No DLC packages found."
         ),
         "warnings": warnings,
-        "merged_tree_sha256": tree_sha256(app),
+        "merged_tree_signature": tree_stat_signature(app),
         "completed_at": utc_now(),
     }
     reports = root / "reports"
@@ -738,30 +715,33 @@ def _resume_merged_game(
         saved_packages = {
             str(Path(item["path"]).resolve()): item
             for item in manifest.get("packages", [])
-            if item.get("path") and item.get("sha256")
+            if item.get("path")
+            and (item.get("source_id") or item.get("scan_id"))
         }
         current_packages = [
             item
             for item in [*game["base"], *game["patches"], *game["dlc"]]
             if item.get("supported") and not item.get("duplicate_of")
         ]
-        for package_index, package in enumerate(current_packages, start=1):
+        for package in current_packages:
             source = Path(package["path"]).resolve()
             saved = saved_packages.get(str(source))
             if saved is None:
                 return None
-            current_sha = _sha256_with_progress(
-                source,
-                "source_hash",
-                package_index=package_index,
-                package_total=max(len(current_packages), 1),
-                package_name=source.name,
-            )
-            if current_sha != saved["sha256"]:
+            current_id = file_stat_identity(source)
+            saved_id = saved.get("source_id") or saved.get("scan_id")
+            if saved_id.partition("-")[2] != current_id.partition("-")[2]:
                 return None
-            package["sha256"] = current_sha
-            package["sha256_verified"] = True
-        if tree_sha256(app) != report.get("merged_tree_sha256"):
+            stat_result = source.stat()
+            package["source_id"] = current_id
+            package["size"] = stat_result.st_size
+            package["source_mtime_ns"] = stat_result.st_mtime_ns
+            package.pop("sha256", None)
+            package.pop("sha256_verified", None)
+        if (
+            not report.get("merged_tree_signature")
+            or tree_stat_signature(app) != report.get("merged_tree_signature")
+        ):
             return None
         values = parse_sfo(app / "sce_sys" / "param.sfo")
         if values.get("TITLE_ID") != title_id:
@@ -911,21 +891,12 @@ def _verify_image(
     log_path = settings.root / "logs" / "ps4ffpsc.log"
     verify_command = [*mkpfs, "verify", str(image)]
     verify = _run_logged(verify_command, log_path)
-    tree = _run_logged(
-        [*mkpfs, "tree", str(image), "--deep"], log_path
-    )
     required = required_files
     if required is None:
         required = ["eboot.bin", "sce_sys/param.sfo"]
         if compat == "current-smp":
             required.append("sce_sys/param.json")
-    # The rendered tree prints a directory and its children on separate
-    # indented lines, so exact relative paths are not contiguous text.
-    # Exact-path presence is authoritatively checked by --deep --only below.
-    missing = [item for item in required if Path(item).name not in tree.stdout]
-    if missing:
-        raise RuntimeError(f"deep image tree is missing: {', '.join(missing)}")
-
+    required_sizes: dict[str, int] = {}
     with tempfile.TemporaryDirectory(dir=settings.temp_dir) as temporary:
         extracted = Path(temporary) / "metadata"
         command = [
@@ -943,14 +914,31 @@ def _verify_image(
             extracted_file = extracted / item
             if not extracted_file.is_file():
                 raise RuntimeError(f"deep unpack did not produce {item}")
-            if source_dir and sha256_file(extracted_file) != sha256_file(source_dir / item):
-                raise RuntimeError(f"deep unpack checksum mismatch: {item}")
+            required_sizes[item] = extracted_file.stat().st_size
+            if source_dir:
+                source_file = source_dir / item
+                if not source_file.is_file():
+                    raise RuntimeError(f"source tree is missing required file: {item}")
+                if source_file.stat().st_size != required_sizes[item]:
+                    raise RuntimeError(f"required file size mismatch: {item}")
+        if "sce_sys/param.sfo" in required:
+            values = parse_sfo(extracted / "sce_sys" / "param.sfo")
+            title_id = values.get("TITLE_ID", "")
+            if not validate_title_id(title_id):
+                raise RuntimeError("unpacked param.sfo has an invalid TITLE_ID")
+            if "sce_sys/param.json" in required:
+                validate_shadowmount_param_json(
+                    (extracted / "sce_sys" / "param.json").read_bytes(),
+                    title_id,
+                )
+        if "ps4ffpsc-dlc.json" in required:
+            json.loads((extracted / "ps4ffpsc-dlc.json").read_text(encoding="utf-8"))
     return {
         "verified": True,
+        "verification_mode": "container_and_required_files",
         "mkpfs_output": verify.stdout.strip(),
-        "deep_tree_line_count": len(tree.stdout.splitlines()),
-        "deep_tree_sha256": hashlib.sha256(tree.stdout.encode("utf-8")).hexdigest(),
         "required_files": required,
+        "required_file_sizes": required_sizes,
     }
 
 
@@ -963,7 +951,7 @@ def _pack_dlc_separate(
 ) -> list[dict[str, Any]]:
     artifacts: list[dict[str, Any]] = []
     for item in (entry for entry in game["dlc"] if not entry.get("duplicate_of")):
-        label = item.get("entitlement_label") or f"UNKNOWN-{item['sha256'][:12]}"
+        label = item.get("entitlement_label") or f"UNKNOWN-{item['source_id'][-12:]}"
         source = merged_root / "addcont" / label
         if not source.is_dir():
             continue
@@ -1000,14 +988,14 @@ def _pack_dlc_separate(
                 raise FileExistsError(f"DLC output exists; use --force: {output}")
             output.unlink()
         os.replace(partial, output)
-        digest = sha256_file(output)
-        output.with_name(f"{output.name}.sha256").write_text(
-            f"{digest}  {output.name}\n", encoding="utf-8"
-        )
+        checksum_path = output.with_name(f"{output.name}.sha256")
+        if checksum_path.exists():
+            checksum_path.unlink()
         artifacts.append(
             {
                 "path": str(output),
-                "sha256": digest,
+                "sha256": None,
+                "checksum_generated": False,
                 "entitlement_label": label,
                 "runtime_supported": False,
                 "verification": verification,
@@ -1052,7 +1040,7 @@ def build_game(
     if output.exists() and not settings.force:
         raise FileExistsError(f"output exists; use --force: {output}")
 
-    LOG.info("stage 1/5: validating sources and extracting selected packages")
+    LOG.info("stage 1/5: checking source metadata and extracting selected packages")
     merge_report = _resume_merged_game(settings, game, title_id)
     if merge_report is None:
         stale_merge = root / "merged"
@@ -1135,7 +1123,7 @@ def build_game(
         command += [str(app), str(partial)]
     LOG.info("stage 3/5: creating compressed FFPFSC image")
     _run_logged(command, log_path)
-    LOG.info("stage 4/5: verifying nested image and required files")
+    LOG.info("stage 4/5: verifying the container and required files")
     verification = _verify_image(settings, partial, app, settings.compat)
     if output.exists():
         output.unlink()
@@ -1143,15 +1131,15 @@ def build_game(
     dlc_artifacts: list[dict[str, Any]] = []
     if settings.include_dlc == "separate" and game["dlc"]:
         dlc_artifacts = _pack_dlc_separate(settings, game, root / "merged", mkpfs, log_path)
-    LOG.info("stage 5/5: checksumming output and cleaning temporary files")
-    digest = _sha256_with_progress(output, "artifact_hash")
-    output.with_name(f"{output.name}.sha256").write_text(
-        f"{digest}  {output.name}\n", encoding="utf-8"
-    )
+    LOG.info("stage 5/5: publishing output and cleaning temporary files")
+    checksum_path = output.with_name(f"{output.name}.sha256")
+    if checksum_path.exists():
+        checksum_path.unlink()
     artifact_manifest = {
         "schema_version": 1,
         "artifact": str(output),
-        "sha256": digest,
+        "sha256": None,
+        "checksum_generated": False,
         "size": output.stat().st_size,
         "title_id": title_id,
         "title": game["title"],
@@ -1161,7 +1149,9 @@ def build_game(
         "source_packages": [
             {
                 "path": item["path"],
-                "sha256": item["sha256"],
+                "source_id": item["source_id"],
+                "size": item.get("size"),
+                "source_mtime_ns": item.get("source_mtime_ns"),
                 "kind": item["kind"],
                 "app_version": item.get("app_version"),
             }
@@ -1202,7 +1192,7 @@ def build_game(
                 f"APP_VER: {version}",
                 "PKG: "
                 + ", ".join(
-                    item["sha256"]
+                    item["source_id"]
                     for item in [*game["base"], *game["patches"]]
                     if not item.get("duplicate_of")
                 ),

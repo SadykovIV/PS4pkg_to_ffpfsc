@@ -129,11 +129,11 @@ TEXTS = {
         "source_recursive": "будут просмотрены все подпапки",
         "and_more": "… и ещё {count}",
         "stage_word": "этап",
-        "stage_sources": "проверка и извлечение PKG",
+        "stage_sources": "проверка метаданных и извлечение PKG",
         "stage_merge": "объединение base и patch",
         "stage_compress": "сжатие FFPFSC",
-        "stage_verify": "проверка результата",
-        "stage_checksum_cleanup": "контрольная сумма и очистка",
+        "stage_verify": "проверка контейнера и обязательных файлов",
+        "stage_checksum_cleanup": "публикация результата и очистка",
         "phase_scan": "анализ файлов",
         "phase_exfat": "создание exFAT",
         "phase_compress": "сжатие",
@@ -142,16 +142,13 @@ TEXTS = {
         "phase_compare": "сверка данных",
         "processing": "обработка",
         "game": "Игра",
-        "check_pkg": "проверка PKG",
         "extract_pkg": "извлечение PKG",
         "merge_pkg": "объединение PKG",
-        "checksum": "контрольная сумма",
         "cleanup_temp": "очистка временных файлов",
         "stage_status": "{title} · этап {stage}/{total}: {action}",
         "pkg_status": "{title} · этап 1/5: {action} {current}/{total} · {percent}%",
         "merge_status": "{title} · этап 2/5: объединение PKG {current}/{total}",
         "phase_status": "{title} · этап {stage}/5: {action} · {percent}%",
-        "checksum_status": "{title} · этап 5/5: контрольная сумма · {percent}%",
         "cleanup_status": "{title} · этап 5/5: очистка временных файлов",
         "scan_none": "Сканирование: PKG не найдены",
         "scan_progress": "Сканирование PKG: {current}/{total}",
@@ -253,11 +250,11 @@ TEXTS = {
         "source_recursive": "all subfolders will be scanned",
         "and_more": "… and {count} more",
         "stage_word": "stage",
-        "stage_sources": "validate and extract PKGs",
+        "stage_sources": "check metadata and extract PKGs",
         "stage_merge": "merge base and patches",
         "stage_compress": "compress FFPFSC",
-        "stage_verify": "verify the result",
-        "stage_checksum_cleanup": "checksum and cleanup",
+        "stage_verify": "verify the container and required files",
+        "stage_checksum_cleanup": "publish the result and clean up",
         "phase_scan": "scan files",
         "phase_exfat": "create exFAT",
         "phase_compress": "compress",
@@ -266,16 +263,13 @@ TEXTS = {
         "phase_compare": "compare data",
         "processing": "processing",
         "game": "Game",
-        "check_pkg": "verify PKG",
         "extract_pkg": "extract PKG",
         "merge_pkg": "merge PKG",
-        "checksum": "checksum",
         "cleanup_temp": "clean temporary files",
         "stage_status": "{title} · stage {stage}/{total}: {action}",
         "pkg_status": "{title} · stage 1/5: {action} {current}/{total} · {percent}%",
         "merge_status": "{title} · stage 2/5: merge PKG {current}/{total}",
         "phase_status": "{title} · stage {stage}/5: {action} · {percent}%",
-        "checksum_status": "{title} · stage 5/5: checksum · {percent}%",
         "cleanup_status": "{title} · stage 5/5: clean temporary files",
         "scan_none": "Scanning: no PKGs found",
         "scan_progress": "Scanning PKGs: {current}/{total}",
@@ -1048,16 +1042,14 @@ class MainWindow(QMainWindow):
         except (TypeError, ValueError):
             package_index = package_total = 1
 
-        if scope in {"source_hash", "extract"}:
-            segment = 0.20 * ratio if scope == "source_hash" else 0.20 + 0.80 * ratio
-            package_progress = (package_index - 1 + segment) / package_total
+        if scope == "extract":
+            package_progress = (package_index - 1 + ratio) / package_total
             local = 2.0 + 28.0 * package_progress
-            action_key = "check_pkg" if scope == "source_hash" else "extract_pkg"
             self._set_build_progress(
                 local,
                 "pkg_status",
                 title=title,
-                action_key=action_key,
+                action_key="extract_pkg",
                 current=package_index,
                 total=package_total,
                 percent=round(ratio * 100),
@@ -1092,14 +1084,6 @@ class MainWindow(QMainWindow):
                 stage=self.current_build_stage,
                 percent=round(ratio * 100),
                 **phase_values,
-            )
-            return
-        if scope == "artifact_hash":
-            self._set_build_progress(
-                96.0 + 3.0 * ratio,
-                "checksum_status",
-                title=title,
-                percent=round(ratio * 100),
             )
             return
         if scope == "cleanup":

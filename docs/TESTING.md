@@ -14,13 +14,14 @@ Run:
 The suite uses synthetic SFO and directory fixtures only. It covers corrupted
 SFO, classification helpers, version ordering, IDs/content labels, Unicode,
 path traversal, symlinks, duplicates, conflicting bases, orphan patches,
-overlay reports, deterministic JSON, sparse files above 4 GiB, resume hashing,
+overlay reports, deterministic JSON, sparse files above 4 GiB, stat-based resume,
 and a real MkPFS nested-exFAT integration.
 
-Latest local result on Apple Silicon: CMake/CTest passed; pytest `31 passed`;
-doctor passed; two real user packages scanned/extracted; the produced Journey
-artifact passed outer MkPFS verification with zero errors and exact deep-unpack
-SHA comparison. `host_tests_passed=true`,
+Latest local result on Apple Silicon: CMake/CTest passed; pytest `59 passed`;
+GUI smoke passed. Regression tests explicitly fail if normal scan, unpack,
+resume, or build code attempts to call the full-file SHA-256 helper. A prior
+Journey artifact passed outer MkPFS verification with zero errors and exact
+deep-unpack SHA comparison. `host_tests_passed=true`,
 `static_shadowmount_checks_passed=true`. The user confirmed that this exact
 Journey artifact launches and works on PS5 on 2026-07-26, therefore its
 sidecar and local reports contain `ps5_runtime_verified=true`. New artifacts

@@ -52,4 +52,9 @@ def test_mkpfs_nested_exfat_build_verify_and_deep_unpack(tmp_path: Path) -> None
     assert process.returncode == 0, process.stdout + process.stderr
     result = _verify_image(settings, output, source, "current-smp")
     assert result["verified"]
-    assert result["deep_tree_line_count"] > 3
+    assert result["verification_mode"] == "container_and_required_files"
+    assert set(result["required_file_sizes"]) == {
+        "eboot.bin",
+        "sce_sys/param.sfo",
+        "sce_sys/param.json",
+    }

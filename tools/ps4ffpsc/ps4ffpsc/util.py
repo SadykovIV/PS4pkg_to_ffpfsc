@@ -40,6 +40,16 @@ def sha256_file(
     return digest.hexdigest()
 
 
+def file_stat_identity(path: Path) -> str:
+    """Return a cheap identity derived from path, size and mtime, not file contents."""
+    resolved = path.resolve()
+    stat_result = resolved.stat()
+    material = (
+        f"{resolved}\0{stat_result.st_size}\0{stat_result.st_mtime_ns}"
+    ).encode("utf-8", errors="surrogateescape")
+    return "stat-" + hashlib.sha256(material).hexdigest()
+
+
 def sanitize_component(value: str, fallback: str, max_chars: int = 120) -> str:
     normalized = unicodedata.normalize("NFC", value)
     normalized = INVALID_COMPONENT_RE.sub("_", normalized).rstrip(" .")
@@ -124,6 +134,27 @@ def iter_tree_files(root: Path) -> Iterable[tuple[Path, Path]]:
 def tree_manifest(root: Path) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     casefolded: dict[str, str] = {}
+    for relative, path in sorted(
+        iter_tree_files(root), key=lambda item: item[0].as_posix()
+    ):
+        if any(part == ".DS_Store" or part.startswith("._") for part in relative.parts):
+            continue
+        rel_text = relative.as_posix()
+        folded = unicodedata.normalize("NFC", rel_text).casefold()
+        previous = casefolded.get(folded)
+        if previous is not None and previous != rel_text:
+            raise ValueError(
+                f"case-insensitive path collision: {previous!r} vs {rel_text!r}"
+            )
+        casefolded[folded] = rel_text
+        result.append({"path": rel_text, "size": path.stat().st_size, "sha256": sha256_file(path)})
+    return result
+
+
+def tree_stat_manifest(root: Path) -> list[dict[str, Any]]:
+    """Describe a tree without reading file payloads."""
+    result: list[dict[str, Any]] = []
+    casefolded: dict[str, str] = {}
     for relative, path in sorted(iter_tree_files(root), key=lambda item: item[0].as_posix()):
         if any(part == ".DS_Store" or part.startswith("._") for part in relative.parts):
             continue
@@ -133,8 +164,33 @@ def tree_manifest(root: Path) -> list[dict[str, Any]]:
         if previous is not None and previous != rel_text:
             raise ValueError(f"case-insensitive path collision: {previous!r} vs {rel_text!r}")
         casefolded[folded] = rel_text
-        result.append({"path": rel_text, "size": path.stat().st_size, "sha256": sha256_file(path)})
+        stat_result = path.stat()
+        result.append(
+            {
+                "path": rel_text,
+                "size": stat_result.st_size,
+                "mtime_ns": stat_result.st_mtime_ns,
+            }
+        )
     return result
+
+
+def tree_stat_signature(manifest_or_root: Iterable[dict[str, Any]] | Path) -> str:
+    """Hash tree metadata only; file contents are never opened."""
+    manifest = (
+        tree_stat_manifest(manifest_or_root)
+        if isinstance(manifest_or_root, Path)
+        else manifest_or_root
+    )
+    digest = hashlib.sha256()
+    for entry in manifest:
+        digest.update(entry["path"].encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(entry["size"]).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(str(entry.get("mtime_ns", 0)).encode("ascii"))
+        digest.update(b"\n")
+    return "stat-" + digest.hexdigest()
 
 
 def tree_sha256_from_manifest(manifest: Iterable[dict[str, Any]]) -> str:

@@ -17,9 +17,11 @@ Python, исходный репозиторий или внешние прило
 - Индикатор показывает общий процент, текущий подэтап, прошедшее время и
   расчётное время до завершения; прогресс извлечения и MkPFS обновляется во
   время работы.
-- Объединение использует hardlinks с автоматическим fallback на копирование,
-  не хеширует распакованное дерево дважды и удаляет уже ненужные распакованные
-  PKG после проверенного merge.
+- Объединение использует hardlinks с автоматическим fallback на копирование и
+  удаляет уже ненужные распакованные PKG после проверенного merge.
+- Обычная сборка больше не вычисляет полные хэши исходных PKG, распакованных и
+  объединённых деревьев или готового образа. Resume использует быстрые
+  идентификаторы пути/размера/mtime и структурные сигнатуры без чтения payload.
 - После полностью успешной сборки временный каталог игры удаляется
   автоматически. При ошибке или отмене данные для продолжения сохраняются.
 - Добавлена полная английская локализация GUI и переключатель
@@ -29,12 +31,8 @@ Python, исходный репозиторий или внешние прило
 
 - Патч теперь корректно заменяет файл базы, когда путь отличается только
   регистром символов.
-- Полностью одинаковые PKG автоматически исключаются после проверки SHA-256.
 - GUI показывает точную причину ошибки сборки вместо одного кода возврата.
 - Команда сборки больше не сканирует выбранный каталог PKG второй раз.
-- Полная сборка Beat Saber `CUSA12878` v02.04 проверена на наборе из 248 PKG:
-  один точный дубликат исключён, итоговый FFPFSC прошёл глубокую проверку MkPFS
-  без ошибок и предупреждений.
 
 ### Использование
 
@@ -77,8 +75,11 @@ not required on the destination Mac.
   the obsolete `Application Support/PS4 FFPFSC/unpacked` directory.
 - The progress area shows overall percentage, current substage, elapsed time and
   estimated time remaining, with live extraction and MkPFS updates.
-- Merge staging uses hardlinks with an automatic copy fallback, avoids hashing
-  an extracted tree twice, and discards extracted PKG trees after verification.
+- Merge staging uses hardlinks with an automatic copy fallback and discards
+  extracted PKG trees after verification.
+- Normal builds no longer fully hash source PKGs, extracted/merged trees, or the
+  completed image. Resume uses cheap path/size/mtime identities and structural
+  signatures without reading payload data.
 - A fully successful build automatically removes its per-game temporary
   workspace. Failed or cancelled builds keep resumable state.
 - Full English GUI localization and a persistent **Русский / English** language
@@ -87,12 +88,8 @@ not required on the destination Mac.
 ## Fixes in 0.2.1
 
 - A patch can now replace a base file when its path changes only by letter case.
-- Byte-identical PKGs are automatically excluded after SHA-256 verification.
 - The GUI displays the exact build failure instead of only an exit code.
 - A build no longer scans the selected PKG directory twice.
-- A full Beat Saber `CUSA12878` v02.04 build was tested with 248 PKGs: one exact
-  duplicate was excluded and the resulting FFPFSC passed deep MkPFS validation
-  with no errors or warnings.
 
 ## Usage
 

@@ -21,8 +21,8 @@ the next launch.
 
 The scan path intentionally avoids reading every byte of every package. It
 reads package headers/metadata and records a cheap path/size/mtime scan identity.
-The worker computes and records the full SHA-256 only after the user starts a
-build, immediately before extracting that package.
+At build time the worker refreshes that cheap identity and starts extraction
+immediately. It does not perform a full source-file hash pass.
 
 ## Workflow
 
@@ -43,8 +43,8 @@ base `CATEGORY=gd` is required before it can be built with its DLC.
 
 The progress area shows the overall percentage for all selected games, the
 current stage and substage, exact elapsed time, and an estimated remaining time.
-PKG hashing/extraction and MkPFS compression/verification stream structured
-progress to the GUI. Before enough work has completed for a useful estimate,
+PKG extraction and MkPFS compression/verification stream structured progress
+to the GUI. Before enough work has completed for a useful estimate,
 the remaining-time field explicitly says that it is still being calculated.
 Builds run one TITLE_ID at a time, and the GUI continues with the next selected
 game if one build fails.

@@ -43,10 +43,11 @@ workflow calls `scripts/build_release_windows_x64.ps1`; it verifies the frozen
 GUI, CLI worker, MkPFS, bundled PKG helper, and every PE binary architecture.
 
 Scanning reads only package headers and metadata. It neither copies each PKG nor
-hashes an entire multi-gigabyte file; the full SHA-256 is computed only when a
-build starts, before extraction. A patch (`CATEGORY=gp`) and DLC cannot replace
-the required base package (`CATEGORY=gd`); the GUI keeps the readiness action
-available and displays this exact reason.
+hashes an entire multi-gigabyte file. When a build starts, it checks only the
+path, size, and modification time, then begins extraction immediately. A patch
+(`CATEGORY=gp`) and DLC cannot replace the required base package
+(`CATEGORY=gd`); the GUI keeps the readiness action available and displays this
+exact reason.
 
 Extracted PKGs, merge trees and MkPFS scratch files are stored under
 `PS4 FFPFSC` inside the temporary directory selected in the GUI (`%TEMP%` on
@@ -79,8 +80,8 @@ extractor is reported as `unsupported_or_encrypted_pkg`; other packages continue
 ```
 
 Put `.pkg` or `.PKG` files anywhere under `pkg/`. Input files are never renamed,
-modified, or removed. Outputs are published only after outer PFS verification,
-deep tree inspection, exact-path metadata extraction, and SHA-256 comparison.
+modified, or removed. Outputs are published only after MkPFS container
+verification and extraction/validation of the required metadata paths.
 
 Run `./ps4ffpsc --help` for commands and per-command options. The defaults are in
 `ps4ffpsc.toml`; CLI arguments win.
