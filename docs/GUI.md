@@ -75,7 +75,7 @@ directory, so the indicator does not introduce extra payload reads or copies.
 ## Launch and packaging
 
 Download and completely extract
-`PS4-FFPFSC-v0.2.3-windows-x64.zip`, then launch `PS4 FFPFSC.exe`. The
+`PS4-FFPFSC-v0.2.4-windows-x64.zip`, then launch `PS4 FFPFSC.exe`. The
 accompanying `_internal` directory and `ps4ffpsc-worker.exe` are required parts
 of the self-contained application.
 

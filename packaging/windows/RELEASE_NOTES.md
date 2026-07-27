@@ -1,4 +1,4 @@
-# PS4 FFPFSC 0.2.3 — Windows x64
+# PS4 FFPFSC 0.2.4 — Windows x64
 
 ## Русская версия
 
@@ -6,6 +6,24 @@
 MkPFS, библиотеки сжатия/криптографии и модуль чтения и извлечения PS4 PKG уже
 находятся внутри архива. Установка Python, Visual C++ Redistributable, Git,
 Homebrew или других приложений не требуется.
+
+### Исправления 0.2.4
+
+- Исправлено аварийное завершение нативного PKG extractor с кодом Windows
+  `0xC0000374` при распаковке patch-PKG, содержащих AES-записи с размером,
+  не кратным 16 байтам. Последний блок теперь безопасно дополняется и
+  обрезается до исходного размера без повреждения памяти.
+- Существующий игровой `sce_sys/param.json`, содержащий только `gameIntent`,
+  теперь дополняется обязательными для ShadowMountPlus полями `titleId` и
+  `titleName`. Исходные игровые поля сохраняются.
+- Удалена завышенная повторная проверка, требовавшая перед MkPFS свободное место
+  в размере 2,2× всех PKG. Используются точные проверки места назначения и
+  временных PFSC spool-файлов самого MkPFS.
+- Добавлены C++-регрессионные тесты AES-записей размером 160 и 532 байта.
+  Проблемные patch-PKG It Takes Two и Gran Turismo 7 проверены отдельно.
+- Временное состояние распаковки, созданное версиями до 0.2.4, один раз
+  пересоздаётся, чтобы не использовать данные, полученные старым extractor.
+- Версия приложения и автономных архивов обновлена до 0.2.4.
 
 ### Изменения 0.2.3
 
@@ -71,6 +89,24 @@ Self-contained build for 64-bit Windows 10/11. Python, Qt for Python, MkPFS,
 compression/cryptography libraries and the PS4 PKG inspection/extraction helper
 are included. Python, the Visual C++ Redistributable, Git, Homebrew and other
 applications are not required.
+
+## Fixes in 0.2.4
+
+- Fixed native PKG extractor crashes with Windows code `0xC0000374` while
+  extracting patch PKGs whose AES metadata entry length is not divisible by
+  16 bytes. The final block is now safely zero-padded and truncated without
+  accessing memory outside the buffer.
+- An existing game `sce_sys/param.json` containing only `gameIntent` is now
+  augmented with the `titleId` and `titleName` fields required by
+  ShadowMountPlus while preserving the original game metadata.
+- Removed the redundant pre-MkPFS check that required free temporary space
+  equal to 2.2× all PKGs. MkPFS now performs its own exact destination and PFSC
+  spool space checks.
+- Added C++ regression tests for 160-byte and 532-byte AES entries. The
+  reported It Takes Two and Gran Turismo 7 patch PKGs were tested separately.
+- Temporary extraction state created before 0.2.4 is rebuilt once so data
+  produced by the old extractor cannot be resumed.
+- Application and standalone archive versions were updated to 0.2.4.
 
 ## Changes in 0.2.3
 

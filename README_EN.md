@@ -12,14 +12,19 @@ Both release archives are self-contained and include Python, Qt, MkPFS and the
 native PKG helper:
 
 - **Windows x64:** extract
-  `PS4-FFPFSC-v0.2.3-windows-x64.zip` completely, then run
+  `PS4-FFPFSC-v0.2.4-windows-x64.zip` completely, then run
   `PS4 FFPFSC.exe`. Keep the accompanying files in the extracted directory.
   An unsigned build may require explicit approval in Microsoft Defender
   SmartScreen on first launch.
-- **macOS arm64:** extract `PS4-FFPFSC-v0.2.3-macos-arm64.zip`, move
+- **macOS arm64:** extract `PS4-FFPFSC-v0.2.4-macos-arm64.zip`, move
   `PS4 FFPFSC.app` to `/Applications`, then use
   **Control-click → Open** for the first launch of the current ad-hoc-signed
   build.
+
+Version 0.2.4 fixes Windows extractor crashes with code `0xC0000374` on some
+patch PKGs, augments game-provided `param.json` metadata for ShadowMountPlus
+without losing `gameIntent`, and removes an overly conservative repeated
+free-space check.
 
 To reproduce the macOS release from source:
 

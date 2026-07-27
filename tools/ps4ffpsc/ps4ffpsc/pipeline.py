@@ -35,6 +35,8 @@ from .util import (
 
 LOG = logging.getLogger("ps4ffpsc")
 PROGRESS_PREFIX = "PS4FFPSC_PROGRESS "
+EXTRACTOR_REVISION = "aes-tail-padding-v1"
+EXTRACTION_STATE_SCHEMA_VERSION = 3
 
 
 @dataclass
@@ -223,10 +225,24 @@ def _load_state(root: Path) -> dict[str, Any]:
     path = root / ".ps4ffpsc-state.json"
     if path.exists():
         state = read_json(path)
-        if state.get("schema_version") == 2:
+        if (
+            state.get("schema_version") == EXTRACTION_STATE_SCHEMA_VERSION
+            and state.get("extractor_revision") == EXTRACTOR_REVISION
+        ):
             return state
-        LOG.info("ignoring legacy hash-based extraction state: %s", path)
-    return {"schema_version": 2, "packages": {}, "updated_at": utc_now()}
+        packages = root / "packages"
+        if packages.exists():
+            safe_remove_tree(packages, root)
+        LOG.info(
+            "discarded extraction state created by an older PKG extractor: %s",
+            path,
+        )
+    return {
+        "schema_version": EXTRACTION_STATE_SCHEMA_VERSION,
+        "extractor_revision": EXTRACTOR_REVISION,
+        "packages": {},
+        "updated_at": utc_now(),
+    }
 
 
 def _save_state(root: Path, state: dict[str, Any]) -> None:
@@ -422,6 +438,7 @@ def unpack_game(settings: Settings, inventory: dict[str, Any], title_id: str) ->
 
     manifest = {
         "schema_version": 1,
+        "extractor_revision": EXTRACTOR_REVISION,
         "title_id": title_id,
         "title": game["title"],
         "original_title": game["title"],
@@ -549,7 +566,10 @@ def merge_game(
     game = game_or_raise(inventory, title_id)
     root = game_root(settings, game)
     manifest_path = root / "manifest.json"
-    if not manifest_path.exists():
+    if (
+        not manifest_path.exists()
+        or read_json(manifest_path).get("extractor_revision") != EXTRACTOR_REVISION
+    ):
         unpack_game(settings, inventory, title_id)
     compat = compat or settings.compat
     base = [item for item in game["base"] if not item.get("duplicate_of")]
@@ -639,13 +659,22 @@ def merge_game(
             f"merged APP_VER {values.get('APP_VER')!r} does not match latest package {expected_version!r}"
         )
     generated_param_json = False
+    normalized_param_json = False
     if compat == "current-smp":
         param_json = partial / "sce_sys" / "param.json"
-        if param_json.exists():
-            validate_shadowmount_param_json(param_json.read_bytes(), title_id)
-        else:
-            param_json.write_bytes(build_param_json(title_id, choose_title(values)))
-            generated_param_json = True
+        existing_param_json = param_json.read_bytes() if param_json.exists() else None
+        shadowmount_param_json = build_param_json(
+            title_id,
+            choose_title(values),
+            existing_param_json,
+        )
+        if existing_param_json != shadowmount_param_json:
+            atomic_write_json(
+                param_json,
+                json.loads(shadowmount_param_json.decode("utf-8")),
+            )
+            generated_param_json = existing_param_json is None
+            normalized_param_json = existing_param_json is not None
         validate_shadowmount_param_json(param_json.read_bytes(), title_id)
     elif compat != "patched-smp":
         raise ValueError(f"unsupported compatibility mode: {compat}")
@@ -686,6 +715,7 @@ def merge_game(
     os.replace(addcont_partial, addcont)
     report = {
         "schema_version": 1,
+        "extractor_revision": EXTRACTOR_REVISION,
         "title_id": title_id,
         "title": game["title"],
         "compatibility": compat,
@@ -703,6 +733,7 @@ def merge_game(
         "tombstone_reason": "No explicit deletion metadata was identified in shadPS4 0.7.0 extraction.",
         "delta_patch_warning": any("DELTA_PATCH" in item.get("pkg_flags", []) for item in patches),
         "generated_param_json": generated_param_json,
+        "normalized_existing_param_json": normalized_param_json,
         "param_sfo_preserved": True,
         "static_shadowmount_compatible": compat == "current-smp",
         "static_shadowmount_checks_passed": compat == "current-smp",
@@ -757,6 +788,7 @@ def _resume_merged_game(
         if (
             report.get("title_id") != title_id
             or report.get("compatibility") != settings.compat
+            or report.get("extractor_revision") != EXTRACTOR_REVISION
         ):
             return None
         saved_packages = {
@@ -1107,7 +1139,6 @@ def build_game(
     version = merge_report["latest_app_version"]
     if partial.exists():
         partial.unlink()
-    check_disk_space(settings.temp_dir, _disk_required([*game["base"], *game["patches"]], 2.2))
     mkpfs = mkpfs_command(settings)
     log_path = settings.root / "logs" / "ps4ffpsc.log"
     inner_image: Path | None = None
@@ -1184,6 +1215,7 @@ def build_game(
         checksum_path.unlink()
     artifact_manifest = {
         "schema_version": 1,
+        "extractor_revision": EXTRACTOR_REVISION,
         "artifact": str(output),
         "sha256": None,
         "checksum_generated": False,

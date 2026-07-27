@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from ps4ffpsc.pipeline import (
+    EXTRACTOR_REVISION,
     Settings,
     merge_game,
     package_destination,
@@ -50,7 +51,10 @@ def test_synthetic_base_patch_overlay_and_param_json(tmp_path: Path) -> None:
     }
     inventory = {"games": {"CUSA12345": game}}
     root = settings.unpacked_dir / game["directory_name"]
-    atomic_write_json(root / "manifest.json", {"synthetic": True})
+    atomic_write_json(
+        root / "manifest.json",
+        {"synthetic": True, "extractor_revision": EXTRACTOR_REVISION},
+    )
     base_dir = package_destination(root, base)
     patch_dir = package_destination(root, patch)
     (base_dir / "sce_sys").mkdir(parents=True)
@@ -60,6 +64,11 @@ def test_synthetic_base_patch_overlay_and_param_json(tmp_path: Path) -> None:
     (base_dir / "sce_sys" / "param.sfo").write_bytes(
         make_sfo({"TITLE_ID": "CUSA12345", "TITLE": "Игра", "APP_VER": "01.00", "CATEGORY": "gd"})
     )
+    original_param_json = (
+        b'{\n  "gameIntent": {"permittedIntents": '
+        b'[{"intentType": "joinSession"}]}\n}\n'
+    )
+    (base_dir / "sce_sys" / "param.json").write_bytes(original_param_json)
     (patch_dir / "data.bin").write_bytes(b"new")
     (patch_dir / "sce_sys" / "param.sfo").write_bytes(
         make_sfo({"TITLE_ID": "CUSA12345", "TITLE": "Игра", "APP_VER": "01.10", "CATEGORY": "gp"})
@@ -68,13 +77,19 @@ def test_synthetic_base_patch_overlay_and_param_json(tmp_path: Path) -> None:
     merged = root / "merged" / "app"
     assert (merged / "data.bin").read_bytes() == b"new"
     assert parse_sfo(merged / "sce_sys" / "param.sfo")["APP_VER"] == "01.10"
-    validate_shadowmount_param_json(
+    merged_param_json = validate_shadowmount_param_json(
         (merged / "sce_sys" / "param.json").read_bytes(), "CUSA12345"
     )
+    assert merged_param_json["gameIntent"]["permittedIntents"] == [
+        {"intentType": "joinSession"}
+    ]
+    assert (base_dir / "sce_sys" / "param.json").read_bytes() == original_param_json
     replacement = next(item for item in report["overlay_changes"] if item["path"] == "data.bin")
     assert replacement["previous_size"] == 3
     assert replacement["new_size"] == 3
     assert report["delta_patch_warning"]
+    assert not report["generated_param_json"]
+    assert report["normalized_existing_param_json"]
     assert not report["ps5_runtime_verified"]
 
 
@@ -96,7 +111,10 @@ def test_patch_can_replace_path_with_case_only_name_change(tmp_path: Path) -> No
     }
     inventory = {"games": {"CUSA12878": game}}
     root = settings.unpacked_dir / game["directory_name"]
-    atomic_write_json(root / "manifest.json", {"synthetic": True})
+    atomic_write_json(
+        root / "manifest.json",
+        {"synthetic": True, "extractor_revision": EXTRACTOR_REVISION},
+    )
     base_dir = package_destination(root, base)
     patch_dir = package_destination(root, patch)
     (base_dir / "sce_sys").mkdir(parents=True)

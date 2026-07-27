@@ -6,7 +6,13 @@ from pathlib import Path
 import pytest
 
 from ps4ffpsc import pipeline
-from ps4ffpsc.pipeline import Settings, _resume_merged_game, build_game
+from ps4ffpsc.pipeline import (
+    EXTRACTOR_REVISION,
+    EXTRACTION_STATE_SCHEMA_VERSION,
+    Settings,
+    _resume_merged_game,
+    build_game,
+)
 from ps4ffpsc.sfo import build_param_json, make_sfo
 from ps4ffpsc.util import (
     atomic_write_json,
@@ -101,7 +107,15 @@ def _prepare_fake_pipeline(
     monkeypatch.setattr(pipeline, "_resume_merged_game", lambda *_args: None)
     monkeypatch.setattr(pipeline, "unpack_game", fake_unpack)
     monkeypatch.setattr(pipeline, "merge_game", fake_merge)
-    monkeypatch.setattr(pipeline, "check_disk_space", lambda *_args: None)
+    monkeypatch.setattr(
+        pipeline,
+        "check_disk_space",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError(
+                "packing must use MkPFS destination and spool space checks"
+            )
+        ),
+    )
     monkeypatch.setattr(pipeline, "mkpfs_command", lambda *_args: ["mkpfs"])
     monkeypatch.setattr(pipeline, "_run_logged", fake_run)
     return root
@@ -342,6 +356,7 @@ def test_verified_merged_workspace_can_resume_without_extracted_packages(
         {
             "title_id": "CUSA12345",
             "compatibility": "current-smp",
+            "extractor_revision": EXTRACTOR_REVISION,
             "latest_app_version": "01.00",
             "merged_tree_signature": tree_stat_signature(app),
         },
@@ -360,3 +375,29 @@ def test_verified_merged_workspace_can_resume_without_extracted_packages(
     assert report["latest_app_version"] == "01.00"
     assert game["base"][0]["source_id"] == source_id
     assert not (root / "packages").exists()
+
+
+def test_older_extractor_state_discards_only_stale_package_trees(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "unpacked" / "CUSA12345 - Synthetic Game"
+    package_file = root / "packages" / "base" / "old" / "payload.bin"
+    package_file.parent.mkdir(parents=True)
+    package_file.write_bytes(b"stale extraction")
+    unrelated = root / "merged" / "app" / "eboot.bin"
+    unrelated.parent.mkdir(parents=True)
+    unrelated.write_bytes(b"keep")
+    atomic_write_json(
+        root / ".ps4ffpsc-state.json",
+        {
+            "schema_version": 2,
+            "packages": {"old": {"status": "verified"}},
+        },
+    )
+
+    state = pipeline._load_state(root)
+
+    assert state["schema_version"] == EXTRACTION_STATE_SCHEMA_VERSION
+    assert state["extractor_revision"] == EXTRACTOR_REVISION
+    assert not (root / "packages").exists()
+    assert unrelated.read_bytes() == b"keep"

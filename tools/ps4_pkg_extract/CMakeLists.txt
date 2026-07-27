@@ -46,3 +46,18 @@ if(MSVC AND PS4FFPSC_STATIC_CRYPTOPP)
 endif()
 
 add_test(NAME ps4_pkg_extract_help COMMAND ps4_pkg_extract --help)
+
+add_executable(ps4_pkg_extract_crypto_tests
+  tests/crypto_tests.cpp
+  "${SHADPS4_PKG_ROOT}/core/crypto/crypto.cpp")
+target_compile_features(ps4_pkg_extract_crypto_tests PRIVATE cxx_std_23)
+target_include_directories(ps4_pkg_extract_crypto_tests PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/compat"
+  "${SHADPS4_PKG_ROOT}"
+  "${CRYPTOPP_INCLUDE_DIR}")
+target_link_libraries(ps4_pkg_extract_crypto_tests PRIVATE "${CRYPTOPP_LIBRARY}")
+if(MSVC AND PS4FFPSC_STATIC_CRYPTOPP)
+  set_property(TARGET ps4_pkg_extract_crypto_tests PROPERTY
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+add_test(NAME ps4_pkg_extract_crypto_tests COMMAND ps4_pkg_extract_crypto_tests)

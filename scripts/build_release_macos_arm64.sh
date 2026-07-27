@@ -6,7 +6,7 @@ PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 BUILD_ROOT="${PROJECT_ROOT}/build-release"
 RELEASE_ROOT="${PROJECT_ROOT}/release"
 APP_PATH="${BUILD_ROOT}/dist/PS4 FFPFSC.app"
-VERSION="0.2.3"
+VERSION="0.2.4"
 
 if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
   echo "This release must be built natively on macOS arm64." >&2

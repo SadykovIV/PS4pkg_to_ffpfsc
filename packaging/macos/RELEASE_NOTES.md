@@ -1,4 +1,4 @@
-# PS4 FFPFSC 0.2.3 — macOS arm64
+# PS4 FFPFSC 0.2.4 — macOS arm64
 
 ## Русская версия
 
@@ -6,6 +6,23 @@
 MkPFS, библиотеки сжатия/криптографии и модуль чтения метаданных и извлечения
 PS4 PKG уже находятся внутри приложения. На целевом Mac не нужны Homebrew,
 Python, исходный репозиторий или внешние приложения.
+
+### Исправления 0.2.4
+
+- Исправлен выход за границы памяти при расшифровке AES-записей PKG, размер
+  которых не кратен 16 байтам. Последний блок теперь безопасно дополняется и
+  обрезается до исходного размера; исправление проверено под AddressSanitizer.
+- Существующий игровой `sce_sys/param.json`, содержащий только `gameIntent`,
+  теперь дополняется обязательными для ShadowMountPlus полями `titleId` и
+  `titleName` без потери исходных игровых полей.
+- Удалена завышенная повторная проверка, требовавшая перед MkPFS свободное место
+  в размере 2,2× всех PKG. Используются точные проверки места назначения и
+  временных PFSC spool-файлов самого MkPFS.
+- Малый patch-PKG It Takes Two полностью распакован обычной и ASan-сборкой;
+  также отдельно проверен patch-PKG Gran Turismo 7.
+- Временное состояние распаковки, созданное версиями до 0.2.4, один раз
+  пересоздаётся, чтобы не использовать данные, полученные старым extractor.
+- Версия приложения и автономных архивов обновлена до 0.2.4.
 
 ### Изменения 0.2.3
 
@@ -81,6 +98,23 @@ Self-contained Apple Silicon application. Python, Qt for Python, MkPFS,
 compression/cryptography runtimes and the PS4 PKG metadata/extraction helper are
 inside the application bundle. Homebrew, Python and the source repository are
 not required on the destination Mac.
+
+## Fixes in 0.2.4
+
+- Fixed an out-of-bounds access while decrypting PKG AES metadata entries whose
+  size is not divisible by 16 bytes. The final block is safely zero-padded and
+  truncated to the original length; the fix was verified with AddressSanitizer.
+- An existing game `sce_sys/param.json` containing only `gameIntent` is now
+  augmented with the `titleId` and `titleName` fields required by
+  ShadowMountPlus without losing original game metadata.
+- Removed the redundant pre-MkPFS check that required free temporary space
+  equal to 2.2× all PKGs. MkPFS now performs its own exact destination and PFSC
+  spool space checks.
+- The small It Takes Two patch PKG was fully extracted with both release and
+  ASan builds; the Gran Turismo 7 patch PKG was also tested separately.
+- Temporary extraction state created before 0.2.4 is rebuilt once so data
+  produced by the old extractor cannot be resumed.
+- Application and standalone archive versions were updated to 0.2.4.
 
 ## Changes in 0.2.3
 

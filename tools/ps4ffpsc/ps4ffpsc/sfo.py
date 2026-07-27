@@ -124,15 +124,32 @@ def choose_title(values: dict[str, Any], preferred_index: int | None = None) -> 
     return "Unknown Game"
 
 
-def build_param_json(title_id: str, title_name: str) -> bytes:
-    payload = {
-        "localizedParameters": {
-            "defaultLanguage": "en-US",
-            "en-US": {"titleName": title_name},
-        },
-        "titleId": title_id,
-        "titleName": title_name,
-    }
+def build_param_json(
+    title_id: str,
+    title_name: str,
+    existing_data: bytes | None = None,
+) -> bytes:
+    payload: dict[str, Any] = {}
+    if existing_data is not None and not existing_data.startswith(b"\xef\xbb\xbf"):
+        try:
+            existing_payload = json.loads(existing_data.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            existing_payload = None
+        if isinstance(existing_payload, dict):
+            payload = existing_payload
+
+    localized = payload.get("localizedParameters")
+    if not isinstance(localized, dict):
+        localized = {}
+    english = localized.get("en-US")
+    if not isinstance(english, dict):
+        english = {}
+    english["titleName"] = title_name
+    localized["defaultLanguage"] = "en-US"
+    localized["en-US"] = english
+    payload["localizedParameters"] = localized
+    payload["titleId"] = title_id
+    payload["titleName"] = title_name
     return (json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
 
 

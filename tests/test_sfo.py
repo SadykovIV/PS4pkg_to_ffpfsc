@@ -54,3 +54,27 @@ def test_param_json_title_mismatch_rejected() -> None:
     with pytest.raises(ValueError, match="mismatch"):
         validate_shadowmount_param_json(build_param_json("CUSA12345", "Game"), "CUSA54321")
 
+
+def test_param_json_preserves_existing_game_metadata() -> None:
+    original = json.dumps(
+        {
+            "gameIntent": {
+                "permittedIntents": [{"intentType": "joinSession"}],
+            }
+        }
+    ).encode()
+
+    generated = build_param_json("CUSA16746", "It Takes Two", original)
+    parsed = validate_shadowmount_param_json(generated, "CUSA16746")
+
+    assert parsed["gameIntent"]["permittedIntents"] == [
+        {"intentType": "joinSession"}
+    ]
+    assert parsed["titleName"] == "It Takes Two"
+
+
+@pytest.mark.parametrize("original", [b"not json", b"\xef\xbb\xbfbad"])
+def test_invalid_existing_param_json_is_safely_replaced(original: bytes) -> None:
+    generated = build_param_json("CUSA12345", "Game", original)
+    parsed = validate_shadowmount_param_json(generated, "CUSA12345")
+    assert parsed["titleName"] == "Game"
