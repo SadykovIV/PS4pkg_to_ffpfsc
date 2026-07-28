@@ -23,7 +23,13 @@ from .pipeline import (
     unpack_game,
     verify_artifact,
 )
-from .runtime import application_data_root, ensure_application_directories, resource_root
+from .runtime import (
+    application_data_root,
+    ensure_application_directories,
+    join_windows_job_from_environment,
+    maximum_logical_cpu_count,
+    resource_root,
+)
 
 EXIT_GENERAL = 1
 EXIT_CONFLICT = 2
@@ -46,6 +52,11 @@ def _common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--temp-dir")
     parser.add_argument("--compat", choices=["current-smp", "patched-smp"])
     parser.add_argument("--include-dlc", choices=["auto", "bundle", "separate", "off"])
+    parser.add_argument(
+        "--output-format",
+        choices=["ffpfsc", "exfat"],
+        help="output image format (default: ffpfsc; exfat is uncompressed)",
+    )
     parser.add_argument("--keep-inner-image", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--no-resume", action="store_true")
@@ -64,6 +75,17 @@ def _common(parser: argparse.ArgumentParser) -> None:
         type=int,
         choices=range(0, 10),
         help="MkPFS zlib compression level (0=store, 1=fastest, 9=maximum; default: 7)",
+    )
+    maximum_workers = maximum_logical_cpu_count()
+    parser.add_argument(
+        "--compression-workers",
+        type=int,
+        choices=range(1, maximum_workers + 1),
+        metavar=f"1..{maximum_workers}",
+        help=(
+            "MkPFS compression workers "
+            "(default: half of available logical CPUs)"
+        ),
     )
 
 
@@ -100,7 +122,10 @@ def build_parser() -> argparse.ArgumentParser:
     build_command.add_argument("--all", action="store_true")
     _common(build_command)
 
-    verify_parser = sub.add_parser("verify", help="Verify and deep-inspect a FFPFSC")
+    verify_parser = sub.add_parser(
+        "verify",
+        help="Verify and inspect an FFPFSC or raw exFAT image",
+    )
     verify_parser.add_argument("file", type=Path)
     _common(verify_parser)
 
@@ -149,6 +174,13 @@ def _settings(args: argparse.Namespace) -> Settings:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if not join_windows_job_from_environment():
+        print(
+            "ps4ffpsc: could not join the GUI process job; "
+            "the operation was not started",
+            file=sys.stderr,
+        )
+        return EXIT_GENERAL
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command is None:

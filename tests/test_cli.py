@@ -2,8 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from ps4ffpsc import cli
 from ps4ffpsc.pipeline import Settings
+from ps4ffpsc.runtime import (
+    default_compression_worker_count,
+    maximum_logical_cpu_count,
+)
 
 
 def test_build_parser_accepts_full_mkpfs_compression_range(
@@ -21,6 +27,40 @@ def test_build_parser_accepts_full_mkpfs_compression_range(
     )
     settings = Settings.load(tmp_path, no_deflate_args, tmp_path)
     assert settings.compression_level == 0
+    assert settings.compression_workers is None
+
+
+def test_build_parser_accepts_output_format_and_bounded_workers(
+    tmp_path: Path,
+) -> None:
+    parser = cli.build_parser()
+    maximum = maximum_logical_cpu_count()
+    requested = min(3, maximum)
+    args = parser.parse_args(
+        [
+            "build",
+            "CUSA12345",
+            "--output-format",
+            "exfat",
+            "--compression-workers",
+            str(requested),
+        ]
+    )
+    settings = Settings.load(tmp_path, args, tmp_path)
+
+    assert settings.output_format == "exfat"
+    assert settings.compression_workers == requested
+    assert default_compression_worker_count(maximum) >= 1
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "build",
+                "CUSA12345",
+                "--compression-workers",
+                str(maximum + 1),
+            ]
+        )
 
 
 def test_build_reuses_inventory_from_initial_scan(

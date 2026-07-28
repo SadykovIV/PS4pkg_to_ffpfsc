@@ -1986,12 +1986,11 @@ def cli_mkpfs_extract_run(args: argparse.Namespace) -> int:
     if detected == ImageFormat.EXFAT:
         if deep:
             info("--deep has no effect for raw exFAT images; extracting image contents")
-        if selectors:
-            info("--only is not supported for raw exFAT images; extracting everything")
         result: PFSExtractionResult = extract_exfat_image(
             image=image,
             output_path=output_path,
             progress=Progress(enabled=not bool(getattr(args, "no_progress", False))),
+            selectors=selectors,
         )
         for w in result.warnings:
             info(w)

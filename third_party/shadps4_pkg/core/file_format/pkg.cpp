@@ -222,43 +222,55 @@ bool PKG::Extract(const std::filesystem::path& filepath, const std::filesystem::
             // file.Seek(entry.offset, fsSeekSet);
         }
 
-        Common::FS::IOFile out(extract_path / "sce_sys" / name, Common::FS::FileAccessMode::Write);
-        if (!file.Seek(entry.offset)) {
+        const u32 entry_id = static_cast<u32>(entry.id);
+        const bool encrypted_np_entry = IsEncryptedNpMetadataEntry(entry_id);
+        const u64 plaintext_size = static_cast<u64>(entry.size);
+        const u64 stored_size =
+            PkgEntryStoredSize(entry_id, static_cast<u32>(entry.size));
+        const u64 entry_offset = static_cast<u64>(entry.offset);
+        const u64 declared_pkg_size = static_cast<u64>(pkgheader.pkg_size);
+        if (entry_offset > pkgSize || stored_size > pkgSize - entry_offset ||
+            entry_offset > declared_pkg_size || stored_size > declared_pkg_size - entry_offset) {
+            failreason = "PKG entry exceeds the package bounds: " + std::string(name);
+            return false;
+        }
+        if (!file.Seek(entry_offset)) {
             failreason = "Failed to seek to PKG entry offset";
             return false;
         }
 
-        std::vector<u8> data;
-        data.resize(entry.size);
-        file.ReadRaw<u8>(data.data(), entry.size);
-        out.WriteRaw<u8>(data.data(), entry.size);
-        out.Close();
+        std::vector<u8> data(static_cast<size_t>(stored_size));
+        if (file.ReadRaw<u8>(data.data(), data.size()) != data.size()) {
+            failreason = "Failed to read the complete PKG entry: " + std::string(name);
+            return false;
+        }
 
-        // Decrypt Np stuff and overwrite.
-        if (entry.id == 0x400 || entry.id == 0x401 || entry.id == 0x402 ||
-            entry.id == 0x403) { // somehow 0x401 is not decrypting
-            decNp.resize(entry.size);
-            if (!file.Seek(entry.offset)) {
-                failreason = "Failed to seek to PKG entry offset";
-                return false;
-            }
-
-            std::vector<u8> data;
-            data.resize(entry.size);
-            file.ReadRaw<u8>(data.data(), entry.size);
-
-            std::span<u8> cipherNp(data.data(), entry.size);
+        const u8* output_data = data.data();
+        if (encrypted_np_entry) {
+            decNp.resize(static_cast<size_t>(plaintext_size));
             std::array<u8, 64> concatenated_ivkey_dk3_;
             std::memcpy(concatenated_ivkey_dk3_.data(), &entry, sizeof(entry));
             std::memcpy(concatenated_ivkey_dk3_.data() + sizeof(entry), dk3_.data(), sizeof(dk3_));
             PKG::crypto.ivKeyHASH256(concatenated_ivkey_dk3_, ivKey);
-            PKG::crypto.aesCbcCfb128DecryptEntry(ivKey, cipherNp, decNp);
-
-            Common::FS::IOFile out(extract_path / "sce_sys" / name,
-                                   Common::FS::FileAccessMode::Write);
-            out.Write(decNp);
-            out.Close();
+            try {
+                PKG::crypto.aesCbcCfb128DecryptEntry(ivKey, data, decNp);
+            } catch (const std::exception& error) {
+                failreason =
+                    "Failed to decrypt PKG entry " + std::string(name) + ": " + error.what();
+                return false;
+            }
+            output_data = decNp.data();
         }
+
+        Common::FS::IOFile out(extract_path / "sce_sys" / name,
+                               Common::FS::FileAccessMode::Write);
+        if (!out.IsOpen() ||
+            out.WriteRaw<u8>(output_data, static_cast<size_t>(plaintext_size)) !=
+                static_cast<size_t>(plaintext_size)) {
+            failreason = "Failed to write extracted PKG entry: " + std::string(name);
+            return false;
+        }
+        out.Close();
 
         file.Seek(currentPos);
     }

@@ -3,7 +3,10 @@ from __future__ import annotations
 import ast
 import inspect
 import os
+import sys
 from pathlib import Path
+
+import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -12,7 +15,10 @@ from PySide6.QtWidgets import QApplication
 
 from ps4ffpsc import gui
 from ps4ffpsc.gui import BUILD_STAGE_KEYS, MKPFS_PHASE_KEYS, TEXTS, MainWindow
-from ps4ffpsc.runtime import maximum_logical_cpu_count
+from ps4ffpsc.runtime import (
+    default_compression_worker_count,
+    maximum_logical_cpu_count,
+)
 
 
 def test_translation_catalogs_have_identical_keys() -> None:
@@ -183,7 +189,7 @@ def test_inventory_shows_pkg_and_game_sizes_and_byte_based_extraction_eta(
     settings.clear()
 
 
-def test_compression_level_is_selectable_persistent_and_passed_to_worker(
+def test_output_format_and_compression_are_selectable_persistent_and_passed_to_worker(
     tmp_path: Path,
 ) -> None:
     app = QApplication.instance() or QApplication([])
@@ -200,18 +206,29 @@ def test_compression_level_is_selectable_persistent_and_passed_to_worker(
         for index in range(window.compression_combo.count())
     ] == list(range(10))
     assert window.compression_combo.currentData() == 7
-    assert str(maximum_logical_cpu_count()) in window.compression_threads_label.text()
-    assert "автоматически" in window.compression_threads_label.text()
+    maximum_workers = maximum_logical_cpu_count()
+    default_workers = default_compression_worker_count(maximum_workers)
+    assert window.output_format_combo.currentData() == "ffpfsc"
+    assert window.compression_workers_spin.minimum() == 1
+    assert window.compression_workers_spin.maximum() == maximum_workers
+    assert window.compression_workers_spin.value() == default_workers
+    assert str(maximum_workers) in window.compression_threads_label.text()
+    assert "По умолчанию" in window.compression_threads_label.text()
 
     window.compression_combo.setCurrentIndex(
         window.compression_combo.findData(9)
     )
+    selected_workers = min(3, maximum_workers)
+    window.compression_workers_spin.setValue(selected_workers)
     window.source_mode = "folder"
     window.source_folder = tmp_path
     arguments = window._base_arguments()
 
     level_index = arguments.index("--compression-level")
     assert arguments[level_index + 1] == "9"
+    workers_index = arguments.index("--compression-workers")
+    assert arguments[workers_index + 1] == str(selected_workers)
+    assert arguments[arguments.index("--output-format") + 1] == "ffpfsc"
     assert arguments[arguments.index("--compat") + 1] == "current-smp"
     assert arguments[arguments.index("--include-dlc") + 1] == "auto"
     assert not hasattr(window, "compat_combo")
@@ -220,11 +237,28 @@ def test_compression_level_is_selectable_persistent_and_passed_to_worker(
 
     window.language_combo.setCurrentIndex(1)
     assert "maximum" in window.compression_combo.currentText()
-    assert "automatic maximum" in window.compression_threads_label.text()
+    assert "Default" in window.compression_threads_label.text()
+    window.keep_inner_check.setChecked(True)
+    window.output_format_combo.setCurrentIndex(
+        window.output_format_combo.findData("exfat")
+    )
+    assert not window.compression_combo.isEnabled()
+    assert not window.compression_workers_spin.isEnabled()
+    assert not window.keep_inner_check.isEnabled()
+    assert "not used" in window.compression_threads_label.text()
+    exfat_arguments = window._base_arguments()
+    assert exfat_arguments[
+        exfat_arguments.index("--output-format") + 1
+    ] == "exfat"
+    assert "--compression-level" not in exfat_arguments
+    assert "--compression-workers" not in exfat_arguments
+    assert "--keep-inner-image" not in exfat_arguments
     window.close()
 
     restored = MainWindow(tmp_path, Path(__file__).resolve().parents[1])
     assert restored.compression_combo.currentData() == 9
+    assert restored.compression_workers_spin.value() == selected_workers
+    assert restored.output_format_combo.currentData() == "exfat"
     restored.close()
     settings.clear()
 
@@ -254,5 +288,50 @@ def test_legacy_application_data_temp_setting_migrates_to_system_temp(
 
     assert window.temp_dir != tmp_path
     assert settings.value("temp_dir", type=str) == str(window.temp_dir)
+    window.close()
+    settings.clear()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="source-mode GUI layout is POSIX")
+def test_cancel_button_stops_running_worker_without_scan_error(
+    tmp_path: Path,
+) -> None:
+    app = QApplication.instance() or QApplication([])
+    app.setApplicationName("PS4 FFPFSC cancel test")
+    app.setOrganizationName("ps4ffpsc-tests")
+    settings = QSettings()
+    settings.clear()
+    resources = tmp_path / "resources"
+    python = resources / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    launcher = resources / "ps4ffpsc"
+    launcher.write_text(
+        "import subprocess,sys,time\n"
+        "subprocess.Popen([sys.executable, '-c', 'import time;time.sleep(60)'])\n"
+        "time.sleep(60)\n",
+        encoding="utf-8",
+    )
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    window = MainWindow(data_root, resources)
+    errors: list[tuple[str, str]] = []
+    window._show_error = lambda title, detail: errors.append((title, detail))
+    window._begin_progress("scan")
+
+    window._start_process("scan", ["scan"])
+
+    assert (
+        window.process.state() != gui.QProcess.ProcessState.NotRunning
+    ), errors
+    assert window.cancel_button.isEnabled()
+    window._cancel()
+    assert window.cancel_requested
+    assert not window.cancel_button.isEnabled()
+    assert window.process.waitForFinished(5000)
+    app.processEvents()
+    assert window.stage_state[0] == "cancelled"
+    assert errors == []
+    window.progress_timer.stop()
     window.close()
     settings.clear()

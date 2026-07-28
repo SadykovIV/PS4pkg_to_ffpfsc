@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+from ps4ffpsc import pipeline
 from ps4ffpsc.pipeline import (
     EXTRACTOR_REVISION,
     Settings,
@@ -156,3 +159,62 @@ def test_patch_can_replace_path_with_case_only_name_change(tmp_path: Path) -> No
         if item["path"] == "Media/Modules/Il2cppUserAssemblies.prx"
     )
     assert rename["case_renamed_from"] == "Media/Modules/Il2CppUserAssemblies.prx"
+
+
+def test_merge_discards_workspace_from_older_extractor_revision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(tmp_path)
+    base = _pkg("base", "e" * 64, "01.00")
+    game = {
+        "title_id": "CUSA00592",
+        "title": "Metro Last Light Redux",
+        "directory_name": "CUSA00592 - Metro Last Light Redux",
+        "base": [base],
+        "patches": [],
+        "dlc": [],
+        "unknown": [],
+        "conflicts": [],
+        "warnings": [],
+        "buildable": True,
+    }
+    inventory = {"games": {"CUSA00592": game}}
+    root = settings.unpacked_dir / game["directory_name"]
+    stale_file = root / "merged" / "app" / "stale.bin"
+    stale_file.parent.mkdir(parents=True)
+    stale_file.write_bytes(b"old extractor")
+    atomic_write_json(
+        root / "manifest.json",
+        {"extractor_revision": "older-extractor"},
+    )
+
+    def fake_unpack(*_args: object) -> dict[str, str]:
+        destination = package_destination(root, base)
+        (destination / "sce_sys").mkdir(parents=True)
+        (destination / "eboot.bin").write_bytes(b"new extraction")
+        (destination / "sce_sys" / "param.sfo").write_bytes(
+            make_sfo(
+                {
+                    "TITLE_ID": "CUSA00592",
+                    "TITLE": "Metro Last Light Redux",
+                    "APP_VER": "01.00",
+                    "CATEGORY": "gd",
+                }
+            )
+        )
+        atomic_write_json(
+            root / "manifest.json",
+            {"extractor_revision": EXTRACTOR_REVISION},
+        )
+        return {"status": "verified"}
+
+    monkeypatch.setattr(pipeline, "unpack_game", fake_unpack)
+
+    report = merge_game(settings, inventory, "CUSA00592")
+
+    assert report["extractor_revision"] == EXTRACTOR_REVISION
+    assert not stale_file.exists()
+    assert (root / "merged" / "app" / "eboot.bin").read_bytes() == (
+        b"new extraction"
+    )

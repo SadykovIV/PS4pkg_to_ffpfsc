@@ -39,11 +39,17 @@ immediately. It does not perform a full source-file hash pass.
    packages are checked by default. Exact copies identified by the PKG's
    embedded package digest are shown as duplicates and unchecked by default;
    split `part1`/`part2` packages with different digests remain checked.
-6. Choose the FFPFSC compression level, then build. Levels 0 through 9 are
-   available and level 7 is the default. Level 0 disables deflate compression.
-   The selected value is saved for the next launch. MkPFS uses all logical CPUs
-   available to the application; the detected worker count is shown beside the
-   selector.
+6. Choose the output format, then build. Compressed `FFPFSC` is the default;
+   uncompressed raw `exFAT` is also available. Raw exFAT is written directly to
+   the final artifact, and selective verification reads the filesystem
+   structure and byte-compares only required game files instead of creating a
+   second full-size image.
+7. For FFPFSC, choose a compression level from 0 through 9 and a worker count
+   from 1 through the detected logical CPU count. Level 7 is the default; level
+   0 disables deflate inside the FFPFSC container. The worker default is half
+   of the logical CPUs, with a minimum of one, so conversion does not occupy
+   every available thread. Both selections are persisted. Compression controls
+   do not apply to raw exFAT.
 
 When packages were found but no game is buildable, the primary action remains
 enabled as **Check readiness** / **Проверить готовность**. It lists the actual
@@ -62,8 +68,10 @@ field explicitly says that it is still being calculated.
 Builds run one TITLE_ID at a time, and the GUI continues with the next selected
 game if one build fails.
 
-**Cancel** first requests a graceful process termination and then forces it
-after three seconds. A later run can reuse verified extraction state when
+**Cancel** clears the remaining game queue and terminates the complete process
+tree on both macOS and Windows—not only the GUI worker, but also the native PKG
+extractor and MkPFS. This prevents detached children from continuing to write
+after cancellation. A later run can reuse verified extraction state when
 **Resume interrupted work** is enabled.
 
 Before extracting, resume performs a metadata-only check of each previously
@@ -72,6 +80,10 @@ trees are reused without opening their payload files, and only missing,
 changed, or previously failed PKGs are extracted. The per-package state is
 saved after every successful extraction and can also be recovered from the
 current manifest.
+
+Extractor revisions are part of the resume identity. Version 0.2.6 advances
+that revision, so trees produced by the older NP-metadata extraction logic are
+treated as stale and extracted again rather than accepted as valid cache.
 
 The merge prefers same-filesystem hardlinks over full copies and falls back
 automatically on filesystems that do not support them. Extracted package trees
@@ -86,10 +98,17 @@ operations. This reduces SMB/NAS overhead, especially on macOS. Progress
 reporting is throttled and does not recursively measure the temporary
 directory, so the indicator does not introduce extra payload reads or copies.
 
+Encrypted NP entries `0x400`–`0x403` require two sizes: the declared plaintext
+size and the stored ciphertext size rounded up to the 16-byte AES-CBC boundary.
+For the regression case, a declared 532-byte `npbind.dat` occupies 544 bytes in
+the PKG. The helper now reads and decrypts all 544 bytes, then writes exactly
+532 bytes. This preserves the internal 20-byte SHA-1 footer instead of
+corrupting its final bytes.
+
 ## Launch and packaging
 
 Download and completely extract
-`PS4-FFPFSC-v0.2.5-windows-x64.zip`, then launch `PS4 FFPFSC.exe`. The
+`PS4-FFPFSC-v0.2.6-windows-x64.zip`, then launch `PS4 FFPFSC.exe`. The
 accompanying `_internal` directory and `ps4ffpsc-worker.exe` are required parts
 of the self-contained application.
 

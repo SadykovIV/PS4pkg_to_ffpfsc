@@ -6,6 +6,7 @@ import shutil
 import tempfile
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSplitter,
+    QSpinBox,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -51,19 +53,25 @@ from .gui_model import (
 )
 from .runtime import (
     application_data_root,
+    close_windows_job,
+    configure_worker_process_group,
+    create_windows_kill_on_close_job,
+    default_compression_worker_count,
     default_temporary_directory,
     ensure_application_directories,
     is_frozen,
     maximum_logical_cpu_count,
     resource_root,
+    terminate_process_tree,
+    terminate_windows_job,
     temporary_workspace,
+    WINDOWS_JOB_ENVIRONMENT_VARIABLE,
     worker_executable,
 )
 
 
 APP_NAME = "PS4 FFPFSC"
-APP_VERSION = "0.2.5"
-CREATE_NO_WINDOW = 0x08000000
+APP_VERSION = "0.2.6"
 BUILD_STAGE_START = {1: 2.0, 2: 30.0, 3: 55.0, 4: 88.0, 5: 96.0}
 BUILD_STAGE_KEYS = {
     1: "stage_sources",
@@ -90,7 +98,7 @@ TEXTS = {
         "clear": "Очистить",
         "scan": "Сканировать",
         "storage_section": "2. Папки хранения",
-        "output_files": "Готовые FFPFSC",
+        "output_files": "Готовые образы",
         "temp_files": "Временные файлы (по умолчанию /tmp)",
         "temp_files_windows": "Временные файлы (по умолчанию %TEMP%)",
         "reset_tmp": "Сбросить по умолчанию",
@@ -103,13 +111,18 @@ TEXTS = {
         "header_size": "Размер",
         "log": "Журнал",
         "clear_log": "Очистить журнал",
-        "compression": "Сжатие FFPFSC:",
+        "output_format": "Формат образа:",
+        "format_ffpfsc": "FFPFSC — сжатый (по умолчанию)",
+        "format_exfat": "exFAT — без сжатия",
+        "compression": "Степень сжатия:",
+        "compression_workers": "Потоки сжатия:",
         "compression_level_none": "0 — без deflate-сжатия",
         "compression_level_value": "Уровень {level}",
         "compression_level_fast": "1 — быстрее, образ крупнее",
         "compression_level_default": "7 — стандартное",
         "compression_level_max": "9 — максимальное, медленнее",
-        "compression_threads": "Потоки MkPFS: {count} (автоматически, максимум)",
+        "compression_threads": "По умолчанию {default} · максимум {maximum}",
+        "compression_not_applicable": "Для exFAT сжатие не используется",
         "resume": "Продолжать прерванное",
         "force": "Пересобрать существующее",
         "keep_inner": "Сохранить внутренний exFAT",
@@ -126,7 +139,7 @@ TEXTS = {
         "choose_pkg_title": "Выберите PS4 PKG",
         "pkg_filter": "PlayStation 4 PKG (*.pkg *.PKG);;Все файлы (*)",
         "choose_source_folder": "Выберите папку с PKG (подпапки будут просканированы)",
-        "choose_output": "Куда сохранять FFPFSC",
+        "choose_output": "Куда сохранять готовые образы",
         "choose_temp": "Папка для временных файлов",
         "free_space": "свободно {gib:.1f} GiB",
         "directory_will_create": "каталог будет создан при сборке",
@@ -138,7 +151,8 @@ TEXTS = {
         "stage_sources": "проверка метаданных и извлечение PKG",
         "stage_merge": "объединение base и patch",
         "stage_compress": "сжатие FFPFSC",
-        "stage_verify": "проверка контейнера и обязательных файлов",
+        "stage_exfat": "создание exFAT без сжатия",
+        "stage_verify": "проверка образа и обязательных файлов",
         "stage_checksum_cleanup": "публикация результата и очистка",
         "phase_scan": "анализ файлов",
         "phase_exfat": "создание exFAT",
@@ -168,7 +182,7 @@ TEXTS = {
         "check_paths": "Проверьте пути",
         "build_started": "Запущена сборка: {titles}. Исходные PKG не изменяются.",
         "build_preparing": "{title} · подготовка к сборке",
-        "build_flow": "──── {title}: извлечение → объединение → FFPFSC → проверка",
+        "build_flow": "──── {title}: извлечение → объединение → {format} → проверка",
         "worker_missing": "Не найден рабочий модуль",
         "environment_unready": "Окружение не готово",
         "venv_missing": "Не найден .venv. Один раз запустите scripts/bootstrap_macos.sh.",
@@ -201,7 +215,8 @@ TEXTS = {
         "build_complete_title": "Сборка завершена",
         "build_complete_message": "Успешно собрано и проверено: {count}.\n\n{path}",
         "cancelling": "Отмена…",
-        "cancel_requested": "Запрошена отмена. Процесс будет остановлен безопасно.",
+        "cancel_requested": "Запрошена отмена. Экстрактор, MkPFS и дочерние процессы останавливаются.",
+        "process_tree_setup_failed": "Не удалось создать безопасную группу процессов Windows. Операция не запущена.",
         "about_title": "О программе {app}",
         "about_body": "Приложение для конвертации PS4 PKG в проверенные FFPFSC-образы для ShadowMountPlus Playstation 5<br><br>Автор: Ильдар Садыков <a href=\"https://github.com/SadykovIV/PS4pkg_to_ffpfsc\">SadykovIV/PS4pkg_to_ffpfsc</a>",
         "operation_running": "Операция выполняется",
@@ -216,7 +231,7 @@ TEXTS = {
         "clear": "Clear",
         "scan": "Scan",
         "storage_section": "2. Storage folders",
-        "output_files": "Completed FFPFSC files",
+        "output_files": "Completed images",
         "temp_files": "Temporary files (default: /tmp)",
         "temp_files_windows": "Temporary files (default: %TEMP%)",
         "reset_tmp": "Reset to default",
@@ -229,13 +244,18 @@ TEXTS = {
         "header_size": "Size",
         "log": "Log",
         "clear_log": "Clear log",
-        "compression": "FFPFSC compression:",
+        "output_format": "Image format:",
+        "format_ffpfsc": "FFPFSC — compressed (default)",
+        "format_exfat": "exFAT — uncompressed",
+        "compression": "Compression level:",
+        "compression_workers": "Compression workers:",
         "compression_level_none": "0 — no deflate compression",
         "compression_level_value": "Level {level}",
         "compression_level_fast": "1 — faster, larger image",
         "compression_level_default": "7 — standard",
         "compression_level_max": "9 — maximum, slower",
-        "compression_threads": "MkPFS workers: {count} (automatic maximum)",
+        "compression_threads": "Default {default} · maximum {maximum}",
+        "compression_not_applicable": "Compression is not used for exFAT",
         "resume": "Resume interrupted work",
         "force": "Rebuild existing output",
         "keep_inner": "Keep inner exFAT",
@@ -252,7 +272,7 @@ TEXTS = {
         "choose_pkg_title": "Select PS4 PKGs",
         "pkg_filter": "PlayStation 4 PKG (*.pkg *.PKG);;All files (*)",
         "choose_source_folder": "Select a PKG folder (subfolders will be scanned)",
-        "choose_output": "Select the FFPFSC output folder",
+        "choose_output": "Select the output folder",
         "choose_temp": "Select the temporary files folder",
         "free_space": "{gib:.1f} GiB free",
         "directory_will_create": "directory will be created during build",
@@ -264,7 +284,8 @@ TEXTS = {
         "stage_sources": "check metadata and extract PKGs",
         "stage_merge": "merge base and patches",
         "stage_compress": "compress FFPFSC",
-        "stage_verify": "verify the container and required files",
+        "stage_exfat": "create uncompressed exFAT",
+        "stage_verify": "verify the image and required files",
         "stage_checksum_cleanup": "publish the result and clean up",
         "phase_scan": "scan files",
         "phase_exfat": "create exFAT",
@@ -294,7 +315,7 @@ TEXTS = {
         "check_paths": "Check the selected paths",
         "build_started": "Build started: {titles}. Source PKGs will not be modified.",
         "build_preparing": "{title} · preparing build",
-        "build_flow": "──── {title}: extract → merge → FFPFSC → verify",
+        "build_flow": "──── {title}: extract → merge → {format} → verify",
         "worker_missing": "Worker module not found",
         "environment_unready": "Environment is not ready",
         "venv_missing": ".venv was not found. Run scripts/bootstrap_macos.sh once.",
@@ -327,18 +348,14 @@ TEXTS = {
         "build_complete_title": "Build completed",
         "build_complete_message": "Successfully built and verified: {count}.\n\n{path}",
         "cancelling": "Cancelling…",
-        "cancel_requested": "Cancellation requested. The worker will stop safely.",
+        "cancel_requested": "Cancellation requested. Extractor, MkPFS and child processes are stopping.",
+        "process_tree_setup_failed": "The safe Windows process group could not be created. The operation was not started.",
         "about_title": "About {app}",
         "about_body": "Application for converting PS4 PKGs into verified FFPFSC images for ShadowMountPlus PlayStation 5<br><br>Author: Ildar Sadykov <a href=\"https://github.com/SadykovIV/PS4pkg_to_ffpfsc\">SadykovIV/PS4pkg_to_ffpfsc</a>",
         "operation_running": "Operation in progress",
         "close_running": "Stop the current operation and close the application?",
     },
 }
-
-
-def _hide_windows_worker_console(arguments: Any) -> None:
-    arguments.flags |= CREATE_NO_WINDOW
-
 
 class MainWindow(QMainWindow):
     def __init__(self, root: Path, resources: Path | None = None) -> None:
@@ -358,12 +375,9 @@ class MainWindow(QMainWindow):
         self.process.readyReadStandardError.connect(self._read_stderr)
         self.process.finished.connect(self._process_finished)
         self.process.errorOccurred.connect(self._process_error)
-        if sys.platform == "win32" and hasattr(
-            self.process, "setCreateProcessArgumentsModifier"
-        ):
-            self.process.setCreateProcessArgumentsModifier(
-                _hide_windows_worker_console
-            )
+        self.worker_process_group = configure_worker_process_group(self.process)
+        self.windows_job_handle: int | None = None
+        self.active_process_id = 0
 
         self.source_mode = "folder"
         self.pkg_files: tuple[Path, ...] = ()
@@ -457,19 +471,36 @@ class MainWindow(QMainWindow):
             return self._t("compression_level_max")
         return self._t("compression_level_value", level=level)
 
+    def _current_output_format(self) -> str:
+        value = self.output_format_combo.currentData()
+        return str(value) if value in {"ffpfsc", "exfat"} else "ffpfsc"
+
     def _update_compression_text(self) -> None:
+        for index in range(self.output_format_combo.count()):
+            output_format = str(self.output_format_combo.itemData(index))
+            self.output_format_combo.setItemText(
+                index,
+                self._t(f"format_{output_format}"),
+            )
         for index in range(self.compression_combo.count()):
             level = int(self.compression_combo.itemData(index))
             self.compression_combo.setItemText(
                 index,
                 self._compression_level_text(level),
             )
-        self.compression_threads_label.setText(
-            self._t(
-                "compression_threads",
-                count=maximum_logical_cpu_count(),
+        if self._current_output_format() == "exfat":
+            self.compression_threads_label.setText(
+                self._t("compression_not_applicable")
             )
-        )
+        else:
+            maximum = maximum_logical_cpu_count()
+            self.compression_threads_label.setText(
+                self._t(
+                    "compression_threads",
+                    default=default_compression_worker_count(maximum),
+                    maximum=maximum,
+                )
+            )
 
     def _retranslate_ui(self) -> None:
         for widget, key in self.translated_widgets:
@@ -501,7 +532,7 @@ class MainWindow(QMainWindow):
         self._update_controls()
 
     def _build_ui(self) -> None:
-        self.setWindowTitle(f"{APP_NAME} — PKG → FFPFSC")
+        self.setWindowTitle(f"{APP_NAME} — PKG → FFPFSC / exFAT")
         self.resize(1120, 860)
         self.setMinimumSize(880, 700)
 
@@ -517,7 +548,7 @@ class MainWindow(QMainWindow):
         mark.setFixedSize(48, 48)
         mark.setObjectName("brandMark")
         title_box = QVBoxLayout()
-        title = QLabel("PS4 PKG → FFPFSC")
+        title = QLabel("PS4 PKG → FFPFSC / exFAT")
         title.setObjectName("pageTitle")
         subtitle = self._bind_text(QLabel(), "subtitle")
         subtitle.setObjectName("subtitle")
@@ -678,11 +709,20 @@ class MainWindow(QMainWindow):
         self.resume_check.setChecked(True)
         self.force_check = self._bind_text(QCheckBox(), "force")
         self.keep_inner_check = self._bind_text(QCheckBox(), "keep_inner")
-        options.addWidget(self.resume_check, 1, 0)
-        options.addWidget(self.force_check, 1, 1)
-        options.addWidget(self.keep_inner_check, 1, 2)
+        options.addWidget(self.resume_check, 2, 0)
+        options.addWidget(self.force_check, 2, 1)
+        options.addWidget(self.keep_inner_check, 2, 2)
+        output_format_label = self._bind_text(QLabel(), "output_format")
+        options.addWidget(output_format_label, 0, 0)
+        self.output_format_combo = QComboBox()
+        self.output_format_combo.addItem(self._t("format_ffpfsc"), "ffpfsc")
+        self.output_format_combo.addItem(self._t("format_exfat"), "exfat")
+        self.output_format_combo.currentIndexChanged.connect(
+            self._output_format_changed
+        )
+        options.addWidget(self.output_format_combo, 0, 1)
         compression_label = self._bind_text(QLabel(), "compression")
-        options.addWidget(compression_label, 0, 0)
+        options.addWidget(compression_label, 0, 2)
         self.compression_combo = QComboBox()
         for level in range(0, 10):
             self.compression_combo.addItem(
@@ -695,10 +735,25 @@ class MainWindow(QMainWindow):
         self.compression_combo.currentIndexChanged.connect(
             self._compression_level_changed
         )
-        options.addWidget(self.compression_combo, 0, 1)
+        options.addWidget(self.compression_combo, 0, 3)
+        compression_workers_label = self._bind_text(
+            QLabel(),
+            "compression_workers",
+        )
+        options.addWidget(compression_workers_label, 1, 0)
+        self.compression_workers_spin = QSpinBox()
+        maximum_workers = maximum_logical_cpu_count()
+        self.compression_workers_spin.setRange(1, maximum_workers)
+        self.compression_workers_spin.setValue(
+            default_compression_worker_count(maximum_workers)
+        )
+        self.compression_workers_spin.valueChanged.connect(
+            self._compression_workers_changed
+        )
+        options.addWidget(self.compression_workers_spin, 1, 1)
         self.compression_threads_label = QLabel()
         self.compression_threads_label.setObjectName("summary")
-        options.addWidget(self.compression_threads_label, 0, 2, 1, 2)
+        options.addWidget(self.compression_threads_label, 1, 2, 1, 2)
         self._update_compression_text()
         options.setColumnStretch(4, 1)
         page.addLayout(options)
@@ -776,8 +831,8 @@ class MainWindow(QMainWindow):
                 background: #202936; color: #b9c5d7; border: none;
                 border-right: 1px solid #303a48; padding: 7px;
             }
-            QComboBox, QCheckBox { padding: 4px; }
-            QComboBox {
+            QComboBox, QSpinBox, QCheckBox { padding: 4px; }
+            QComboBox, QSpinBox {
                 background: #202936; border: 1px solid #374355; border-radius: 6px;
                 padding: 6px 10px;
             }
@@ -815,6 +870,19 @@ class MainWindow(QMainWindow):
         if folder and Path(folder).is_dir():
             self.source_mode = "folder"
             self.source_folder = Path(folder)
+        stored_output_format = self.settings.value(
+            "output_format",
+            "ffpfsc",
+            type=str,
+        )
+        output_format_index = self.output_format_combo.findData(
+            stored_output_format
+        )
+        self.output_format_combo.setCurrentIndex(
+            output_format_index
+            if output_format_index >= 0
+            else self.output_format_combo.findData("ffpfsc")
+        )
         stored_compression_level = self.settings.value(
             "compression_level",
             7,
@@ -829,6 +897,15 @@ class MainWindow(QMainWindow):
             compression_index
             if compression_index >= 0
             else self.compression_combo.findData(7)
+        )
+        maximum_workers = maximum_logical_cpu_count()
+        stored_workers = self.settings.value(
+            "compression_workers",
+            default_compression_worker_count(maximum_workers),
+            type=int,
+        )
+        self.compression_workers_spin.setValue(
+            max(1, min(maximum_workers, stored_workers))
         )
         geometry = self.settings.value("window_geometry")
         if geometry is not None:
@@ -845,12 +922,33 @@ class MainWindow(QMainWindow):
             "compression_level",
             int(self.compression_combo.currentData()),
         )
+        self.settings.setValue(
+            "compression_workers",
+            self.compression_workers_spin.value(),
+        )
+        self.settings.setValue(
+            "output_format",
+            self._current_output_format(),
+        )
         self.settings.setValue("window_geometry", self.saveGeometry())
 
     def _compression_level_changed(self, _index: int) -> None:
         level = self.compression_combo.currentData()
         if level is not None:
             self.settings.setValue("compression_level", int(level))
+
+    def _compression_workers_changed(self, value: int) -> None:
+        self.settings.setValue("compression_workers", value)
+
+    def _output_format_changed(self, _index: int) -> None:
+        if not hasattr(self, "compression_combo"):
+            return
+        self.settings.setValue(
+            "output_format",
+            self._current_output_format(),
+        )
+        self._update_compression_text()
+        self._update_controls()
 
     def _choose_files(self) -> None:
         start = str(self.source_folder or self.root / "pkg")
@@ -992,11 +1090,18 @@ class MainWindow(QMainWindow):
             "current-smp",
             "--include-dlc",
             "auto",
-            "--compression-level",
-            str(self.compression_combo.currentData()),
+            "--output-format",
+            self._current_output_format(),
             "--console-log",
             "--json",
         ]
+        if self._current_output_format() == "ffpfsc":
+            arguments += [
+                "--compression-level",
+                str(self.compression_combo.currentData()),
+                "--compression-workers",
+                str(self.compression_workers_spin.value()),
+            ]
         arguments.extend(temporary_cli_arguments(self.temp_dir))
         arguments.extend(
             source_arguments
@@ -1009,7 +1114,10 @@ class MainWindow(QMainWindow):
             arguments.append("--no-resume")
         if self.force_check.isChecked():
             arguments.append("--force")
-        if self.keep_inner_check.isChecked():
+        if (
+            self._current_output_format() == "ffpfsc"
+            and self.keep_inner_check.isChecked()
+        ):
             arguments.append("--keep-inner-image")
         return arguments
 
@@ -1264,7 +1372,11 @@ class MainWindow(QMainWindow):
             self.current_build_stage = stage
             if stage != 1:
                 self._reset_byte_progress()
-            stage_key = BUILD_STAGE_KEYS.get(stage, "processing")
+            stage_key = (
+                "stage_exfat"
+                if stage == 3 and self._current_output_format() == "exfat"
+                else BUILD_STAGE_KEYS.get(stage, "processing")
+            )
             self._set_build_progress(
                 BUILD_STAGE_START.get(stage, 0.0),
                 "stage_status",
@@ -1357,7 +1469,13 @@ class MainWindow(QMainWindow):
         self._set_build_progress(
             0, "build_preparing", title=title_id
         )
-        self._append_log(self._t("build_flow", title=title_id))
+        self._append_log(
+            self._t(
+                "build_flow",
+                title=title_id,
+                format=self._current_output_format().upper(),
+            )
+        )
         package_paths = self.selected_packages_by_title.get(title_id, ())
         source_arguments = source_cli_arguments(
             "files",
@@ -1403,6 +1521,23 @@ class MainWindow(QMainWindow):
         environment.insert("PS4FFPSC_GUI_PROGRESS", "1")
         environment.insert("PS4FFPSC_DATA_ROOT", str(self.root))
         environment.insert("PS4FFPSC_RESOURCE_ROOT", str(self.resources))
+        close_windows_job(self.windows_job_handle)
+        self.windows_job_handle = None
+        if sys.platform == "win32":
+            job_name = f"PS4FFPSC-{os.getpid()}-{uuid.uuid4().hex}"
+            self.windows_job_handle = create_windows_kill_on_close_job(
+                job_name
+            )
+            if self.windows_job_handle is None:
+                self._show_error(
+                    self._t("process_start_error"),
+                    self._t("process_tree_setup_failed"),
+                )
+                return
+            environment.insert(
+                WINDOWS_JOB_ENVIRONMENT_VARIABLE,
+                job_name,
+            )
         self.process.setProcessEnvironment(environment)
         self.process.setWorkingDirectory(str(self.root))
         self.process.setProgram(str(program))
@@ -1411,6 +1546,7 @@ class MainWindow(QMainWindow):
         self.stderr_buffer = ""
         self.operation = operation
         self.cancel_requested = False
+        self.active_process_id = 0
         if operation == "scan":
             self._set_stage("scanning")
         self._update_controls()
@@ -1420,8 +1556,13 @@ class MainWindow(QMainWindow):
                 self._t("process_start_error"), self.process.errorString()
             )
             self.operation = None
+            close_windows_job(self.windows_job_handle)
+            self.windows_job_handle = None
             self._finish_progress(False)
             self._update_controls()
+            return
+        self.active_process_id = int(self.process.processId())
+        self._update_controls()
 
     def _read_stdout(self) -> None:
         data = bytes(self.process.readAllStandardOutput()).decode("utf-8", errors="replace")
@@ -1452,6 +1593,9 @@ class MainWindow(QMainWindow):
         self._read_stderr()
         self._flush_stderr()
         self.operation = None
+        close_windows_job(self.windows_job_handle)
+        self.windows_job_handle = None
+        self.active_process_id = 0
 
         payload: Any = None
         if self.stdout_buffer.strip():
@@ -1461,7 +1605,10 @@ class MainWindow(QMainWindow):
                 self._append_log(self.stdout_buffer.strip())
 
         if operation == "scan":
-            if exit_code in (0, 3):
+            if self.cancel_requested:
+                self._finish_progress(False)
+                self._set_stage("cancelled")
+            elif exit_code in (0, 3):
                 self._finish_scan(payload)
             else:
                 self._finish_progress(False)
@@ -1475,12 +1622,18 @@ class MainWindow(QMainWindow):
             if exit_code == 0:
                 self.build_results[title_id] = payload or {"status": "completed"}
                 self._append_log(self._t("build_success_log", title=title_id))
+            elif self.cancel_requested:
+                self.build_results[title_id] = {
+                    "status": "cancelled",
+                    "exit_code": exit_code,
+                    "error": self._t("cancelled"),
+                }
             else:
                 error_text = build_error_text(
                     payload, title_id, exit_code, self.language
                 )
                 self.build_results[title_id] = {
-                    "status": "cancelled" if self.cancel_requested else "failed",
+                    "status": "failed",
                     "exit_code": exit_code,
                     "error": error_text,
                 }
@@ -1792,20 +1945,35 @@ class MainWindow(QMainWindow):
         self._update_controls()
 
     def _cancel(self) -> None:
-        if self.process.state() == QProcess.ProcessState.NotRunning:
+        if (
+            self.process.state() == QProcess.ProcessState.NotRunning
+            or self.cancel_requested
+        ):
             return
         self.cancel_requested = True
         self.build_queue = []
         self.selected_packages_by_title = {}
         self._set_stage("cancelling")
         self._append_log(self._t("cancel_requested"))
-        self.process.terminate()
-        QTimer.singleShot(
-            3000,
-            lambda: self.process.kill()
-            if self.process.state() != QProcess.ProcessState.NotRunning
-            else None,
-        )
+        stopped = False
+        if self.windows_job_handle is not None:
+            stopped = terminate_windows_job(self.windows_job_handle)
+            # Also stop the direct worker in case Cancel was pressed during
+            # the brief startup interval before it joined the named job.
+            self.process.kill()
+        elif self.worker_process_group and self.active_process_id > 0:
+            stopped = terminate_process_tree(
+                self.active_process_id,
+                force=True,
+            )
+        if not stopped:
+            if sys.platform == "win32" and self.active_process_id > 0:
+                terminate_process_tree(
+                    self.active_process_id,
+                    force=True,
+                )
+            self.process.kill()
+        self._update_controls()
 
     def _tree_item_changed(self, _item: QTreeWidgetItem, _column: int) -> None:
         self._update_inventory_summary()
@@ -1833,13 +2001,18 @@ class MainWindow(QMainWindow):
         self.build_button.setEnabled(
             bool(self.inventory) and bool(self.output_dir) and not running
         )
-        self.cancel_button.setEnabled(running)
+        self.cancel_button.setEnabled(running and not self.cancel_requested)
         self.reveal_button.setEnabled(self.output_dir.is_dir() and not running)
         self.games_tree.setEnabled(not running)
-        self.compression_combo.setEnabled(not running)
+        uses_compression = self._current_output_format() == "ffpfsc"
+        self.output_format_combo.setEnabled(not running)
+        self.compression_combo.setEnabled(not running and uses_compression)
+        self.compression_workers_spin.setEnabled(
+            not running and uses_compression
+        )
         self.resume_check.setEnabled(not running)
         self.force_check.setEnabled(not running)
-        self.keep_inner_check.setEnabled(not running)
+        self.keep_inner_check.setEnabled(not running and uses_compression)
 
     def _append_log(self, text: str) -> None:
         clean = text.rstrip()
@@ -1880,6 +2053,11 @@ class MainWindow(QMainWindow):
                 event.ignore()
                 return
             self._cancel()
+            if not self.process.waitForFinished(5000):
+                self.process.kill()
+                self.process.waitForFinished(2000)
+            close_windows_job(self.windows_job_handle)
+            self.windows_job_handle = None
         self._save_settings()
         event.accept()
 

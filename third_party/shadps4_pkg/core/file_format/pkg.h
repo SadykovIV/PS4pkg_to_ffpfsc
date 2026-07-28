@@ -109,6 +109,20 @@ struct PKGEntry {
 };
 static_assert(sizeof(PKGEntry) == 32);
 
+inline constexpr bool IsEncryptedNpMetadataEntry(u32 entry_id) {
+    return entry_id == 0x400 || entry_id == 0x401 || entry_id == 0x402 ||
+           entry_id == 0x403;
+}
+
+inline constexpr u64 PkgEntryStoredSize(u32 entry_id, u32 plaintext_size) {
+    constexpr u64 aes_block_size = 16;
+    if (!IsEncryptedNpMetadataEntry(entry_id) || plaintext_size == 0) {
+        return plaintext_size;
+    }
+    return (static_cast<u64>(plaintext_size) + aes_block_size - 1) &
+           ~(aes_block_size - 1);
+}
+
 class PKG {
 public:
     PKG();
@@ -180,7 +194,7 @@ private:
     std::vector<u64> sectorMap;
     u64 pfsc_offset;
 
-    std::array<u8, 32> dk3_;
+    std::array<u8, 32> dk3_{};
     std::array<u8, 32> ivKey;
     std::array<u8, 256> imgKey;
     std::array<u8, 32> ekpfsKey;

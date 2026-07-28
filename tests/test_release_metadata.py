@@ -8,8 +8,8 @@ from ps4ffpsc.gui import APP_VERSION
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CURRENT_VERSION = "0.2.5"
-RELEASE_VERSIONS = tuple(f"0.2.{patch}" for patch in range(6))
+CURRENT_VERSION = "0.2.6"
+RELEASE_VERSIONS = tuple(f"0.2.{patch}" for patch in range(7))
 
 
 def test_current_version_is_consistent_across_application_and_packaging() -> None:

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <array>
 #include <stdexcept>
 
@@ -124,8 +125,14 @@ void Crypto::aesCbcCfb128Decrypt(std::span<const CryptoPP::byte, 32> ivkey,
 void Crypto::aesCbcCfb128DecryptEntry(std::span<const CryptoPP::byte, 32> ivkey,
                                       std::span<const CryptoPP::byte> ciphertext,
                                       std::span<CryptoPP::byte> decrypted) {
-    if (ciphertext.size() != decrypted.size()) {
-        throw std::invalid_argument("PKG entry ciphertext and output sizes must match");
+    // Encrypted PKG metadata is stored as complete AES-CBC blocks even when
+    // its declared plaintext size is not block aligned.
+    constexpr size_t block_size = CryptoPP::AES::BLOCKSIZE;
+    const size_t expected_ciphertext_size =
+        decrypted.empty() ? 0 : ((decrypted.size() - 1) / block_size + 1) * block_size;
+    if (ciphertext.size() != expected_ciphertext_size) {
+        throw std::invalid_argument(
+            "PKG entry ciphertext must contain every aligned AES block");
     }
 
     std::array<CryptoPP::byte, CryptoPP::AES::DEFAULT_KEYLENGTH> key;
@@ -137,21 +144,18 @@ void Crypto::aesCbcCfb128DecryptEntry(std::span<const CryptoPP::byte, 32> ivkey,
     CryptoPP::AES::Decryption aesDecryption(key.data(), CryptoPP::AES::DEFAULT_KEYLENGTH);
     CryptoPP::CBC_Mode_ExternalCipher::Decryption cbcDecryption(aesDecryption, iv.data());
 
-    size_t offset = 0;
-    while (ciphertext.size() - offset >= CryptoPP::AES::BLOCKSIZE) {
-        cbcDecryption.ProcessData(decrypted.data() + offset, ciphertext.data() + offset,
-                                  CryptoPP::AES::BLOCKSIZE);
-        offset += CryptoPP::AES::BLOCKSIZE;
+    const size_t complete_plaintext_size = decrypted.size() / block_size * block_size;
+    if (complete_plaintext_size != 0) {
+        cbcDecryption.ProcessData(decrypted.data(), ciphertext.data(), complete_plaintext_size);
     }
 
-    const size_t remainder = ciphertext.size() - offset;
+    const size_t remainder = decrypted.size() - complete_plaintext_size;
     if (remainder != 0) {
-        std::array<CryptoPP::byte, CryptoPP::AES::BLOCKSIZE> padded_ciphertext{};
-        std::array<CryptoPP::byte, CryptoPP::AES::BLOCKSIZE> padded_decrypted{};
-        std::copy_n(ciphertext.data() + offset, remainder, padded_ciphertext.data());
-        cbcDecryption.ProcessData(padded_decrypted.data(), padded_ciphertext.data(),
-                                  CryptoPP::AES::BLOCKSIZE);
-        std::copy_n(padded_decrypted.data(), remainder, decrypted.data() + offset);
+        std::array<CryptoPP::byte, block_size> final_plaintext{};
+        cbcDecryption.ProcessData(final_plaintext.data(),
+                                  ciphertext.data() + complete_plaintext_size, block_size);
+        std::copy_n(final_plaintext.data(), remainder,
+                    decrypted.data() + complete_plaintext_size);
     }
 }
 

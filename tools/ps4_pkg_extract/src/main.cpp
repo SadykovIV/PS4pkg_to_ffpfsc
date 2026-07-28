@@ -124,8 +124,10 @@ static bool ValidatePkgEnvelope(const fs::path& path, std::string& reason) {
             return false;
         }
         const u64 offset = entry.offset;
-        const u64 entry_size = entry.size;
-        if (offset > size || entry_size > size - offset) {
+        const u64 stored_size =
+            PkgEntryStoredSize(static_cast<u32>(entry.id), static_cast<u32>(entry.size));
+        if (offset > declared || stored_size > declared - offset || offset > size ||
+            stored_size > size - offset) {
             reason = "PKG entry is out of bounds";
             return false;
         }

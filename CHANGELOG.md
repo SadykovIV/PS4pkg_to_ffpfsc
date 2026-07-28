@@ -11,6 +11,38 @@ self-contained and require neither Python nor external applications.
 
 ## Русский
 
+### 0.2.6
+
+#### Добавлено
+
+- Выбор формата результата: сжатый `FFPFSC` по умолчанию или несжатый raw
+  `exFAT`. В режиме exFAT готовый образ формируется напрямую, а проверка читает
+  только обязательные игровые файлы и метаданные — второй полный образ на
+  диске не создаётся.
+- Ручной выбор числа потоков сжатия MkPFS от 1 до количества доступных
+  логических процессоров. Значение по умолчанию — половина логических
+  процессоров, но не менее одного.
+- Регрессионный тест для зашифрованной NP-метадаты: объявленные 532 байта
+  `npbind.dat` извлекаются из полного 544-байтного AES-CBC ciphertext.
+
+#### Исправлено
+
+- Кнопка **«Отменить»** теперь завершает всё дерево процессов сборки на macOS и
+  Windows, включая extractor и MkPFS, останавливает очередь выбранных игр и не
+  оставляет фоновые процессы, продолжающие запись.
+- Экстрактор корректно округляет хранимый размер зашифрованных NP-записей
+  `0x400`–`0x403` до 16-байтной границы AES-CBC, расшифровывает полный последний
+  блок и записывает только объявленный размер plaintext. Это устраняет
+  повреждение последних байтов `npbind.dat`.
+- Изменена ревизия extractor: временные деревья, созданные старой логикой,
+  считаются устаревшими и не используются как корректный resumable-кэш.
+- Проверка raw exFAT теперь побайтово сверяет выбранные обязательные файлы,
+  валидирует внутренний SHA-1 `npbind.dat` и распознаёт exFAT по сигнатуре даже
+  без расширения `.exfat`.
+- Sidecar-файлы включают расширение образа в имя, поэтому FFPFSC и exFAT одной
+  версии игры больше не перезаписывают manifest и ShadowMount-инструкцию друг
+  друга.
+
 ### 0.2.5
 
 #### Добавлено
@@ -130,6 +162,37 @@ self-contained and require neither Python nor external applications.
 ---
 
 ## English
+
+### 0.2.6
+
+#### Added
+
+- Output format selection: compressed `FFPFSC` by default or an uncompressed
+  raw `exFAT` image. exFAT output is written directly and verification reads
+  only required metadata, without creating a second full-size image.
+- Manual MkPFS compression worker selection from 1 up to the available logical
+  CPU count. The default is half of the logical CPUs, with a minimum of one.
+- A regression test for encrypted NP metadata: a declared 532-byte
+  `npbind.dat` is recovered from the complete 544-byte AES-CBC ciphertext.
+
+#### Fixed
+
+- **Cancel** now terminates the complete build process tree on macOS and
+  Windows, including the extractor and MkPFS, stops the selected-game queue,
+  and prevents detached background workers from continuing to write.
+- The extractor now rounds the stored size of encrypted NP entries
+  `0x400`–`0x403` to the 16-byte AES-CBC boundary, decrypts the complete final
+  block, and writes only the declared plaintext size. This prevents corruption
+  of the final `npbind.dat` bytes.
+- The extractor revision was advanced so temporary trees produced by the old
+  logic are treated as stale instead of being accepted as valid resumable
+  cache entries.
+- Raw exFAT verification now byte-compares the selected required files,
+  validates the internal `npbind.dat` SHA-1, and detects exFAT by signature
+  even when the file does not use the `.exfat` extension.
+- Sidecar names now retain the image extension, preventing FFPFSC and exFAT for
+  the same game version from overwriting each other's manifest and
+  ShadowMount instructions.
 
 ### 0.2.5
 

@@ -10,6 +10,7 @@ from ps4ffpsc.pipeline import (
     EXTRACTOR_REVISION,
     EXTRACTION_STATE_SCHEMA_VERSION,
     Settings,
+    _artifact_sidecar_path,
     _resume_merged_game,
     build_game,
 )
@@ -126,6 +127,7 @@ def test_successful_build_removes_only_its_temporary_workspace(
 ) -> None:
     settings = _settings(tmp_path)
     settings.compression_level = 9
+    settings.compression_workers = 4
     monkeypatch.setattr(
         pipeline,
         "maximum_logical_cpu_count",
@@ -158,15 +160,15 @@ def test_successful_build_removes_only_its_temporary_workspace(
     assert result["sha256"] is None
     assert result["checksum_generated"] is False
     assert result["compression_level"] == 9
-    assert result["compression_workers"] == 12
-    assert result["compression_workers_mode"] == "maximum_available_logical_cpus"
+    assert result["compression_workers"] == 4
+    assert result["compression_workers_mode"] == "selected"
     assert not output.with_name(f"{output.name}.sha256").exists()
-    assert read_json(output.with_suffix(".manifest.json"))[
+    assert read_json(_artifact_sidecar_path(output, ".manifest.json"))[
         "temporary_workspace_cleaned"
     ] is True
 
 
-def test_mkpfs_compression_arguments_use_selected_level_and_all_cpus(
+def test_mkpfs_compression_arguments_use_selected_level_and_default_half_cpus(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -180,7 +182,15 @@ def test_mkpfs_compression_arguments_use_selected_level_and_all_cpus(
 
     assert pipeline.mkpfs_compression_arguments(settings) == [
         "--cpu-count",
-        "20",
+        "10",
+        "--compression-level",
+        "3",
+    ]
+
+    settings.compression_workers = 7
+    assert pipeline.mkpfs_compression_arguments(settings) == [
+        "--cpu-count",
+        "7",
         "--compression-level",
         "3",
     ]
@@ -205,6 +215,81 @@ def test_failed_verification_keeps_resumable_merged_workspace(
 
     assert (root / "merged" / "app").is_dir()
     assert source.read_bytes() == b"owned source"
+
+
+def test_exfat_build_is_uncompressed_and_does_not_create_a_second_image(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(tmp_path)
+    settings.output_format = "exfat"
+    settings.keep_inner_image = False
+    source = tmp_path / "source.pkg"
+    source.write_bytes(b"owned source")
+    inventory = _inventory(source)
+    root = _prepare_fake_pipeline(monkeypatch, settings, inventory)
+    commands: list[list[str]] = []
+
+    def fake_run(
+        command: list[str],
+        _log_path: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        assert command[1:3] == ["pack", "exfat"]
+        Path(command[4]).write_bytes(b"verified raw exfat")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(pipeline, "_run_logged", fake_run)
+    monkeypatch.setattr(
+        pipeline,
+        "_verify_image",
+        lambda *_args, **kwargs: {
+            "verified": True,
+            "verification_mode": "exfat_and_required_files",
+            "image_format": kwargs["image_format"],
+        },
+    )
+
+    result = build_game(settings, "CUSA12345", inventory)
+
+    output = Path(result["artifact"])
+    assert output.suffix == ".exfat"
+    assert output.read_bytes() == b"verified raw exfat"
+    assert commands == [
+        [
+            "mkpfs",
+            "pack",
+            "exfat",
+            str(root / "merged" / "app"),
+            str(output.with_name(f"{output.name}.partial")),
+            "--cluster-size",
+            "65536",
+        ]
+    ]
+    assert result["output_format"] == "exfat"
+    assert result["outer_container"] is None
+    assert result["compression_level"] is None
+    assert result["compression_workers"] is None
+    assert result["compression_workers_mode"] == "not_applicable"
+    assert result["kept_inner_image"] is None
+    assert not list(settings.output_dir.glob("*.inner.exfat"))
+    assert _artifact_sidecar_path(output, ".manifest.json").is_file()
+    assert _artifact_sidecar_path(output, ".shadowmount.txt").is_file()
+    assert not root.exists()
+
+
+def test_ffpfsc_and_exfat_use_distinct_sidecar_paths(tmp_path: Path) -> None:
+    ffpfsc = tmp_path / "Synthetic Game [v01.00].ffpfsc"
+    exfat = tmp_path / "Synthetic Game [v01.00].exfat"
+
+    assert _artifact_sidecar_path(
+        ffpfsc,
+        ".manifest.json",
+    ) != _artifact_sidecar_path(exfat, ".manifest.json")
+    assert _artifact_sidecar_path(
+        ffpfsc,
+        ".shadowmount.txt",
+    ) != _artifact_sidecar_path(exfat, ".shadowmount.txt")
 
 
 def test_output_inside_game_workspace_is_rejected_before_cleanup(
@@ -415,6 +500,28 @@ def test_missing_state_is_recovered_from_current_manifest(
     assert read_json(root / ".ps4ffpsc-state.json")["packages"] == {
         "stat-existing": record
     }
+
+
+def test_old_manifest_without_state_discards_orphaned_package_trees(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "unpacked" / "CUSA12345 - Synthetic Game"
+    package_tree = root / "packages" / "base" / "stale"
+    package_tree.mkdir(parents=True)
+    (package_tree / "npbind.dat").write_bytes(b"stale")
+    atomic_write_json(
+        root / "manifest.json",
+        {
+            "extractor_revision": "older-extractor",
+            "extractions": [],
+        },
+    )
+
+    state = pipeline._load_state(root)
+
+    assert state["extractor_revision"] == EXTRACTOR_REVISION
+    assert state["packages"] == {}
+    assert not (root / "packages").exists()
 
 
 def test_unpack_rejects_pkg_changed_after_fast_metadata_scan(tmp_path: Path) -> None:

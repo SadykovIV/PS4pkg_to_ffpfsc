@@ -2,9 +2,9 @@
 
 **Languages:** **English** · [Русский](README.md)
 
-> Self-contained GUI converter from supported PS4 PKGs to verified FFPFSC
-> images for ShadowMountPlus. Ready-made macOS arm64 and Windows x64 builds do
-> not require Python or external applications.
+> Self-contained GUI converter from supported PS4 PKGs to verified FFPFSC or
+> raw exFAT images for ShadowMountPlus. Ready-made macOS arm64 and Windows x64
+> builds do not require Python or external applications.
 
 ## Ready-made desktop applications
 
@@ -12,19 +12,20 @@ Both release archives are self-contained and include Python, Qt, MkPFS and the
 native PKG helper:
 
 - **Windows x64:** extract
-  `PS4-FFPFSC-v0.2.5-windows-x64.zip` completely, then run
+  `PS4-FFPFSC-v0.2.6-windows-x64.zip` completely, then run
   `PS4 FFPFSC.exe`. Keep the accompanying files in the extracted directory.
   An unsigned build may require explicit approval in Microsoft Defender
   SmartScreen on first launch.
-- **macOS arm64:** extract `PS4-FFPFSC-v0.2.5-macos-arm64.zip`, move
+- **macOS arm64:** extract `PS4-FFPFSC-v0.2.6-macos-arm64.zip`, move
   `PS4 FFPFSC.app` to `/Applications`, then use
   **Control-click → Open** for the first launch of the current ad-hoc-signed
   build.
 
-Version 0.2.5 adds per-PKG selection, safe exact-duplicate detection,
-compression levels 0–9, and all available MkPFS workers. Interrupted extraction
-now resumes at the first unfinished PKG, while Windows stores temporary data
-under `%TEMP%` by default.
+Version 0.2.6 adds FFPFSC/raw exFAT output selection, configurable MkPFS worker
+count, and reliable cancellation of the complete process tree. It also fixes
+encrypted NP metadata extraction when the final AES-CBC block is partial;
+temporary trees produced before this extractor fix are automatically treated
+as stale.
 
 See the complete release history in [CHANGELOG.md](CHANGELOG.md).
 
@@ -50,6 +51,24 @@ identified by the embedded package digest are marked as duplicates and
 unchecked without a full-file hash pass; different `part1`/`part2` packages
 remain selected. During extraction, progress and the stage ETA follow bytes
 actually written, weighted by the source sizes of base, patch and DLC packages.
+Before building, select compressed FFPFSC (the default) or an uncompressed raw
+exFAT image. Raw exFAT is created as the single partial image, then atomically
+published under its final name after verification. Selective verification reads
+the filesystem structure, extracts and byte-compares the required game files
+and metadata, without creating a second full-size image.
+
+For FFPFSC, compression levels 0 through 9 are available and remembered. Level
+0 disables deflate inside FFPFSC, level 1 favors speed, level 9 favors size, and
+level 7 remains the default. The compression worker selector ranges from 1 to
+the number of logical CPUs visible to the application. It defaults to half of
+that count, with a minimum of one, so MkPFS does not monopolize the host.
+Compression controls do not apply to raw exFAT output.
+
+**Cancel** terminates the complete worker process tree on macOS and Windows,
+including the native extractor and MkPFS, and clears the remaining game queue.
+Previously verified state remains reusable; incomplete partial data is
+discarded on the next attempt, and no detached child is left writing in the
+background.
 
 The Windows x64 release is reproducibly built and smoke-tested by
 `.github/workflows/build-windows-x64.yml` on a native Windows runner. The
@@ -84,8 +103,15 @@ operations. This reduces SMB/NAS overhead. Byte progress comes directly from
 the decrypt/write loop; the GUI does not repeatedly scan the temporary tree or
 create progress-only copies.
 
+For encrypted NP entries `0x400`–`0x403`, the extractor now distinguishes the
+declared plaintext size from the physical ciphertext size. A 532-byte
+`npbind.dat`, for example, is read from 544 bytes aligned to the 16-byte
+AES-CBC boundary: the complete final block is decrypted, while exactly 532
+declared bytes are written. Advancing the extractor revision prevents temporary
+cache produced by the old truncating logic from being reused.
+
 `ps4ffpsc` converts legally owned, shadPS4-supported PS4 PKGs into verified
-ShadowMountPlus `.ffpfsc` artifacts:
+ShadowMountPlus `.ffpfsc` or raw `.exfat` artifacts. The default path is:
 
 `base + ordered patches + preserved DLC → merged app → nested exFAT → compressed PFS`.
 
@@ -111,13 +137,6 @@ verification and extraction/validation of the required metadata paths.
 
 Run `./ps4ffpsc --help` for commands and per-command options. The defaults are in
 `ps4ffpsc.toml`; CLI arguments win.
-
-The GUI exposes FFPFSC compression levels 0 through 9 and remembers the
-selection. Level 0 disables deflate compression, level 1 is faster and usually
-produces a larger image, level 9 maximizes compression at the cost of time, and
-level 7 remains the default. MkPFS automatically receives every logical CPU
-available to the process; the GUI displays that worker count instead of using
-MkPFS's capped auto mode.
 
 ## Compatibility truth
 

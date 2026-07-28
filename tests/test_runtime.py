@@ -1,6 +1,13 @@
 from __future__ import annotations
 
+import os
+import signal
+import sys
+import time
 from pathlib import Path
+
+import pytest
+from PySide6.QtCore import QProcess, QProcessEnvironment
 
 from ps4ffpsc import runtime
 
@@ -105,3 +112,159 @@ def test_application_data_root_does_not_create_heavy_workspace(
     assert (tmp_path / "output").is_dir()
     assert not (tmp_path / "unpacked").exists()
     assert not (tmp_path / "work").exists()
+
+
+@pytest.mark.parametrize(
+    ("maximum", "expected"),
+    [(1, 1), (2, 1), (7, 3), (8, 4), (24, 12)],
+)
+def test_default_compression_workers_use_half_logical_cpus(
+    maximum: int,
+    expected: int,
+) -> None:
+    assert runtime.default_compression_worker_count(maximum) == expected
+
+
+def test_compression_worker_validation_enforces_available_range() -> None:
+    assert runtime.validate_compression_worker_count(None, 10) == 5
+    assert runtime.validate_compression_worker_count(1, 10) == 1
+    assert runtime.validate_compression_worker_count(10, 10) == 10
+    with pytest.raises(ValueError, match=r"1\.\.10"):
+        runtime.validate_compression_worker_count(0, 10)
+    with pytest.raises(ValueError, match=r"1\.\.10"):
+        runtime.validate_compression_worker_count(11, 10)
+
+
+def test_worker_process_group_configuration_is_platform_specific() -> None:
+    class FakeProcess:
+        child_modifier = None
+        windows_modifier = None
+
+        def setChildProcessModifier(self, modifier) -> None:
+            self.child_modifier = modifier
+
+        def setCreateProcessArgumentsModifier(self, modifier) -> None:
+            self.windows_modifier = modifier
+
+    posix_process = FakeProcess()
+    assert runtime.configure_worker_process_group(
+        posix_process,
+        "darwin",
+    )
+    assert posix_process.child_modifier is runtime.os.setsid
+
+    windows_process = FakeProcess()
+    assert runtime.configure_worker_process_group(
+        windows_process,
+        "win32",
+    )
+
+    class Arguments:
+        flags = 0
+
+    arguments = Arguments()
+    windows_process.windows_modifier(arguments)
+    assert arguments.flags & runtime.CREATE_NO_WINDOW
+    assert arguments.flags & runtime.CREATE_NEW_PROCESS_GROUP
+
+
+def test_posix_tree_termination_targets_the_worker_process_group(
+    monkeypatch,
+) -> None:
+    calls: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        runtime.os,
+        "killpg",
+        lambda process_id, selected_signal: calls.append(
+            (process_id, selected_signal)
+        ),
+    )
+
+    assert runtime.terminate_process_tree(
+        1234,
+        force=True,
+        platform_name="darwin",
+    )
+    assert calls == [(1234, runtime.signal.SIGKILL)]
+
+
+def test_process_tree_cancellation_stops_worker_and_child() -> None:
+    process = QProcess()
+    if not runtime.configure_worker_process_group(process):
+        pytest.skip("QProcess process-group support is unavailable")
+    job_handle = None
+    if sys.platform == "win32":
+        job_name = f"PS4FFPSC-test-{os.getpid()}-{time.time_ns()}"
+        job_handle = runtime.create_windows_kill_on_close_job(job_name)
+        assert job_handle is not None
+        environment = QProcessEnvironment.systemEnvironment()
+        environment.insert(
+            runtime.WINDOWS_JOB_ENVIRONMENT_VARIABLE,
+            job_name,
+        )
+        package_root = (
+            Path(__file__).resolve().parents[1] / "tools" / "ps4ffpsc"
+        )
+        previous_python_path = environment.value("PYTHONPATH")
+        environment.insert(
+            "PYTHONPATH",
+            str(package_root)
+            + (
+                os.pathsep + previous_python_path
+                if previous_python_path
+                else ""
+            ),
+        )
+        process.setProcessEnvironment(environment)
+    child_code = (
+        "import subprocess,sys,time;"
+        + (
+            "from ps4ffpsc.runtime import join_windows_job_from_environment;"
+            "assert join_windows_job_from_environment();"
+            if sys.platform == "win32"
+            else ""
+        )
+        + "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)']);"
+        "print(child.pid,flush=True);"
+        "time.sleep(60)"
+    )
+    process.setProgram(sys.executable)
+    process.setArguments(["-c", child_code])
+    process.start()
+    assert process.waitForStarted(5000)
+    worker_pid = int(process.processId())
+    assert process.waitForReadyRead(5000)
+    child_pid = int(bytes(process.readAllStandardOutput()).decode().strip())
+
+    try:
+        if sys.platform == "win32":
+            assert job_handle is not None
+            assert runtime.terminate_windows_job(job_handle)
+        else:
+            assert runtime.terminate_process_tree(worker_pid, force=True)
+        assert process.waitForFinished(5000)
+
+        deadline = time.monotonic() + 3
+        child_alive = True
+        while time.monotonic() < deadline:
+            if sys.platform == "win32":
+                child_alive = runtime.windows_process_is_running(child_pid)
+            else:
+                try:
+                    os.kill(child_pid, 0)
+                except ProcessLookupError:
+                    child_alive = False
+            if not child_alive:
+                break
+            time.sleep(0.05)
+        assert not child_alive
+    finally:
+        runtime.close_windows_job(job_handle)
+        if process.state() != QProcess.ProcessState.NotRunning:
+            process.kill()
+            process.waitForFinished(2000)
+        if sys.platform != "win32":
+            try:
+                os.kill(child_pid, signal.SIGKILL)
+            except (OSError, UnboundLocalError):
+                pass

@@ -15,7 +15,12 @@ from pathlib import Path
 from typing import Any
 
 from .inventory import find_extractor, inspect_package, scan_packages
-from .runtime import is_frozen, maximum_logical_cpu_count
+from .npbind import validate_npbind
+from .runtime import (
+    is_frozen,
+    maximum_logical_cpu_count,
+    validate_compression_worker_count,
+)
 from .sfo import build_param_json, choose_title, parse_sfo, validate_shadowmount_param_json
 from .util import (
     atomic_write_json,
@@ -35,8 +40,9 @@ from .util import (
 
 LOG = logging.getLogger("ps4ffpsc")
 PROGRESS_PREFIX = "PS4FFPSC_PROGRESS "
-EXTRACTOR_REVISION = "aes-tail-padding-v1"
+EXTRACTOR_REVISION = "aligned-np-metadata-ciphertext-v2"
 EXTRACTION_STATE_SCHEMA_VERSION = 3
+OUTPUT_FORMATS = {"ffpfsc", "exfat"}
 
 
 @dataclass
@@ -51,6 +57,8 @@ class Settings:
     include_dlc: str = "auto"
     jobs: int = 2
     compression_level: int = 7
+    compression_workers: int | None = None
+    output_format: str = "ffpfsc"
     resume: bool = True
     force: bool = False
     dry_run: bool = False
@@ -89,6 +97,29 @@ class Settings:
         compression_level = int(compression_level_value)
         if not 0 <= compression_level <= 9:
             raise ValueError("compression level must be within 0..9")
+        output_format = str(
+            getattr(args, "output_format", None) or pack.get("format", "ffpfsc")
+        ).lower()
+        if output_format not in OUTPUT_FORMATS:
+            raise ValueError(
+                "output format must be one of: " + ", ".join(sorted(OUTPUT_FORMATS))
+            )
+        compression_workers_value = getattr(args, "compression_workers", None)
+        if compression_workers_value is None:
+            compression_workers_value = pack.get("compression_workers")
+        compression_workers = (
+            None
+            if compression_workers_value is None
+            else validate_compression_worker_count(compression_workers_value)
+        )
+        keep_inner_image = bool(
+            getattr(args, "keep_inner_image", False)
+            or pack.get("keep_inner_image", False)
+        )
+        if output_format == "exfat" and keep_inner_image:
+            raise ValueError(
+                "--keep-inner-image applies only to FFPFSC output"
+            )
         return cls(
             root=root,
             pkg_dir=resolve("pkg_dir", "pkg"),
@@ -100,6 +131,8 @@ class Settings:
             include_dlc=getattr(args, "include_dlc", None) or shadow.get("include_dlc", "auto"),
             jobs=max(1, int(getattr(args, "jobs", None) or extract.get("jobs", 2))),
             compression_level=compression_level,
+            compression_workers=compression_workers,
+            output_format=output_format,
             resume=bool(
                 getattr(args, "resume", False)
                 or (extract.get("resume", True) and not getattr(args, "no_resume", False))
@@ -108,9 +141,7 @@ class Settings:
             dry_run=bool(getattr(args, "dry_run", False)),
             json_output=bool(getattr(args, "json", False)),
             verbose=bool(getattr(args, "verbose", False)),
-            keep_inner_image=bool(
-                getattr(args, "keep_inner_image", False) or pack.get("keep_inner_image", False)
-            ),
+            keep_inner_image=keep_inner_image,
             pkg_files=tuple(
                 Path(item).expanduser().resolve()
                 for item in (getattr(args, "pkg_file", None) or [])
@@ -297,6 +328,13 @@ def _load_state(root: Path) -> dict[str, Any]:
         if recovered is not None:
             _save_state(root, recovered)
             return recovered
+        packages = root / "packages"
+        if packages.exists():
+            safe_remove_tree(packages, root)
+            LOG.info(
+                "discarded package trees without current extraction metadata: %s",
+                packages,
+            )
     return {
         "schema_version": EXTRACTION_STATE_SCHEMA_VERSION,
         "extractor_revision": EXTRACTOR_REVISION,
@@ -348,6 +386,9 @@ def _verified_resumable_extraction(
     try:
         if tree_stat_signature(destination) != saved.get("tree_signature"):
             return None
+        npbind = destination / "sce_sys" / "npbind.dat"
+        if npbind.is_file():
+            validate_npbind(npbind)
     except (OSError, TypeError, ValueError):
         return None
     return saved
@@ -525,6 +566,28 @@ def unpack_game(settings: Settings, inventory: dict[str, Any], title_id: str) ->
                 f"extractor failed ({process.returncode}) for {package['path']}: "
                 f"{process.stdout.strip() or process.stderr.strip()}"
             )
+        npbind_validation: dict[str, Any] | None = None
+        extracted_npbind = partial / "sce_sys" / "npbind.dat"
+        if extracted_npbind.is_file():
+            try:
+                npbind_validation = validate_npbind(extracted_npbind)
+            except (OSError, ValueError) as error:
+                state["packages"][source_id] = {
+                    "status": "failed_validation",
+                    "path": package["path"],
+                    "error": str(error),
+                }
+                _save_state(root, state)
+                safe_remove_tree(partial, root)
+                raise RuntimeError(
+                    "extracted PKG has invalid sce_sys/npbind.dat: "
+                    f"{package['path']}: {error}"
+                ) from error
+            LOG.info(
+                "validated extracted npbind.dat: entries=%d sha1=%s",
+                npbind_validation["entry_count"],
+                npbind_validation["sha1"],
+            )
         manifest = tree_stat_manifest(partial)
         signature = tree_stat_signature(manifest)
         os.replace(partial, destination)
@@ -539,6 +602,8 @@ def unpack_game(settings: Settings, inventory: dict[str, Any], title_id: str) ->
             "file_count": len(manifest),
             "total_size": sum(int(item["size"]) for item in manifest),
         }
+        if npbind_validation is not None:
+            record["npbind_validation"] = npbind_validation
         state["packages"][source_id] = record
         _save_state(root, state)
         results.append(record)
@@ -674,10 +739,11 @@ def merge_game(
     game = game_or_raise(inventory, title_id)
     root = game_root(settings, game)
     manifest_path = root / "manifest.json"
-    if (
+    stale_extraction = (
         not manifest_path.exists()
         or read_json(manifest_path).get("extractor_revision") != EXTRACTOR_REVISION
-    ):
+    )
+    if stale_extraction:
         unpack_game(settings, inventory, title_id)
     compat = compat or settings.compat
     base = [item for item in game["base"] if not item.get("duplicate_of")]
@@ -690,13 +756,19 @@ def merge_game(
     dlc = [item for item in game["dlc"] if not item.get("duplicate_of")]
     merged = root / "merged"
     app = merged / "app"
+    if settings.dry_run:
+        return {"title_id": title_id, "status": "dry_run"}
+    if stale_extraction and merged.exists():
+        safe_remove_tree(merged, root)
+        LOG.info(
+            "discarded merged data created by an older PKG extractor: %s",
+            merged,
+        )
     partial = merged / "app.partial"
     addcont = merged / "addcont"
     addcont_partial = merged / "addcont.partial"
     if app.exists() and not settings.force:
         raise FileExistsError(f"merged app exists; use --force: {app}")
-    if settings.dry_run:
-        return {"title_id": title_id, "status": "dry_run"}
     if partial.exists():
         safe_remove_tree(partial, root)
     if addcont_partial.exists():
@@ -988,10 +1060,9 @@ def mkpfs_compression_arguments(
     level = int(settings.compression_level)
     if not 0 <= level <= 9:
         raise ValueError("compression level must be within 0..9")
-    workers = (
-        maximum_logical_cpu_count()
-        if worker_count is None
-        else max(1, int(worker_count))
+    workers = validate_compression_worker_count(
+        settings.compression_workers if worker_count is None else worker_count,
+        maximum_logical_cpu_count(),
     )
     return [
         "--cpu-count",
@@ -1086,24 +1157,54 @@ def _run_logged(command: list[str], log_path: Path) -> subprocess.CompletedProce
     return process
 
 
+def _files_identical(left: Path, right: Path) -> bool:
+    if left.stat().st_size != right.stat().st_size:
+        return False
+    with left.open("rb") as left_stream, right.open("rb") as right_stream:
+        while True:
+            left_chunk = left_stream.read(4 * 1024 * 1024)
+            right_chunk = right_stream.read(4 * 1024 * 1024)
+            if left_chunk != right_chunk:
+                return False
+            if not left_chunk:
+                return True
+
+
 def _verify_image(
     settings: Settings,
     image: Path,
     source_dir: Path | None,
     compat: str,
     required_files: list[str] | None = None,
+    image_format: str | None = None,
 ) -> dict[str, Any]:
     settings.temp_dir.mkdir(parents=True, exist_ok=True)
     mkpfs = mkpfs_command(settings)
     log_path = settings.root / "logs" / "ps4ffpsc.log"
     verify_command = [*mkpfs, "verify", str(image)]
+    if image_format is not None:
+        verify_command += [
+            "--format",
+            "pfs" if image_format == "ffpfsc" else image_format,
+        ]
     verify = _run_logged(verify_command, log_path)
-    required = required_files
+    required = list(required_files) if required_files is not None else None
     if required is None:
         required = ["eboot.bin", "sce_sys/param.sfo"]
         if compat == "current-smp":
             required.append("sce_sys/param.json")
+        if (
+            source_dir is not None
+            and (source_dir / "sce_sys" / "npbind.dat").is_file()
+        ):
+            required.append("sce_sys/npbind.dat")
+    optional = (
+        []
+        if "sce_sys/npbind.dat" in required
+        else ["sce_sys/npbind.dat"]
+    )
     required_sizes: dict[str, int] = {}
+    optional_validated: list[str] = []
     with tempfile.TemporaryDirectory(dir=settings.temp_dir) as temporary:
         extracted = Path(temporary) / "metadata"
         command = [
@@ -1114,7 +1215,12 @@ def _verify_image(
             "--deep",
             "--no-progress",
         ]
-        for item in required:
+        if image_format is not None:
+            command += [
+                "--format",
+                "pfs" if image_format == "ffpfsc" else image_format,
+            ]
+        for item in [*required, *optional]:
             command += ["--only", item]
         _run_logged(command, log_path)
         for item in required:
@@ -1128,6 +1234,40 @@ def _verify_image(
                     raise RuntimeError(f"source tree is missing required file: {item}")
                 if source_file.stat().st_size != required_sizes[item]:
                     raise RuntimeError(f"required file size mismatch: {item}")
+                if not _files_identical(source_file, extracted_file):
+                    raise RuntimeError(
+                        f"required file content mismatch: {item}"
+                    )
+            if item == "sce_sys/npbind.dat":
+                try:
+                    extracted_validation = validate_npbind(extracted_file)
+                    if source_dir:
+                        source_validation = validate_npbind(
+                            source_dir / item
+                        )
+                except (OSError, ValueError) as error:
+                    raise RuntimeError(
+                        f"invalid npbind.dat in verified image: {error}"
+                    ) from error
+                if (
+                    source_dir
+                    and source_validation["sha1"]
+                    != extracted_validation["sha1"]
+                ):
+                    raise RuntimeError(
+                        "npbind.dat differs between source and verified image"
+                    )
+        for item in optional:
+            extracted_file = extracted / item
+            if not extracted_file.is_file():
+                continue
+            try:
+                validate_npbind(extracted_file)
+            except (OSError, ValueError) as error:
+                raise RuntimeError(
+                    f"invalid npbind.dat in verified image: {error}"
+                ) from error
+            optional_validated.append(item)
         if "sce_sys/param.sfo" in required:
             values = parse_sfo(extracted / "sce_sys" / "param.sfo")
             title_id = values.get("TITLE_ID", "")
@@ -1142,11 +1282,71 @@ def _verify_image(
             json.loads((extracted / "ps4ffpsc-dlc.json").read_text(encoding="utf-8"))
     return {
         "verified": True,
-        "verification_mode": "container_and_required_files",
+        "verification_mode": (
+            "exfat_and_required_files"
+            if image_format == "exfat"
+            else "container_and_required_files"
+        ),
         "mkpfs_output": verify.stdout.strip(),
         "required_files": required,
         "required_file_sizes": required_sizes,
+        "optional_files_validated": optional_validated,
     }
+
+
+def _artifact_extension(output_format: str) -> str:
+    if output_format not in OUTPUT_FORMATS:
+        raise ValueError(f"unsupported output format: {output_format}")
+    return f".{output_format}"
+
+
+def _artifact_sidecar_path(output: Path, suffix: str) -> Path:
+    return output.with_name(f"{output.name}{suffix}")
+
+
+def _detect_artifact_format(path: Path) -> str:
+    with path.open("rb") as stream:
+        header = stream.read(11)
+    return "exfat" if header[3:11] == b"EXFAT   " else "ffpfsc"
+
+
+def _pack_directory_command(
+    settings: Settings,
+    mkpfs: list[str],
+    source: Path,
+    destination: Path,
+    compression_workers: int | None,
+    *,
+    require_game_files: bool = False,
+) -> list[str]:
+    if settings.output_format == "exfat":
+        return [
+            *mkpfs,
+            "pack",
+            "exfat",
+            str(source),
+            str(destination),
+            "--cluster-size",
+            "65536",
+        ]
+    if compression_workers is None:
+        raise ValueError("FFPFSC packing requires a compression worker count")
+    command = [
+        *mkpfs,
+        "pack",
+        "folder",
+        "--no-adjust-output-file-extension",
+        "--version",
+        "PS5",
+        "--inode-bits",
+        "32",
+        *mkpfs_compression_arguments(settings, compression_workers),
+        "--temp-folder",
+        str(settings.temp_dir),
+    ]
+    if require_game_files:
+        command.append("--require-game-files")
+    return [*command, str(source), str(destination)]
 
 
 def _pack_dlc_separate(
@@ -1155,7 +1355,7 @@ def _pack_dlc_separate(
     merged_root: Path,
     mkpfs: list[str],
     log_path: Path,
-    compression_workers: int,
+    compression_workers: int | None,
 ) -> list[dict[str, Any]]:
     artifacts: list[dict[str, Any]] = []
     for item in (entry for entry in game["dlc"] if not entry.get("duplicate_of")):
@@ -1163,25 +1363,22 @@ def _pack_dlc_separate(
         source = merged_root / "addcont" / label
         if not source.is_dir():
             continue
-        output = settings.output_dir / f"{game['directory_name']} [DLC {label}].ffpfsc"
+        output = settings.output_dir / (
+            f"{game['directory_name']} [DLC {label}]"
+            f"{_artifact_extension(settings.output_format)}"
+        )
+        if output.exists() and not settings.force:
+            raise FileExistsError(f"DLC output exists; use --force: {output}")
         partial = output.with_name(f"{output.name}.partial")
         if partial.exists():
             partial.unlink()
-        command = [
-            *mkpfs,
-            "pack",
-            "folder",
-            "--no-adjust-output-file-extension",
-            "--version",
-            "PS5",
-            "--inode-bits",
-            "32",
-            *mkpfs_compression_arguments(settings, compression_workers),
-            "--temp-folder",
-            str(settings.temp_dir),
-            str(source),
-            str(partial),
-        ]
+        command = _pack_directory_command(
+            settings,
+            mkpfs,
+            source,
+            partial,
+            compression_workers,
+        )
         _run_logged(command, log_path)
         verification = _verify_image(
             settings,
@@ -1189,11 +1386,8 @@ def _pack_dlc_separate(
             source,
             "patched-smp",
             required_files=["ps4ffpsc-dlc.json"],
+            image_format=settings.output_format,
         )
-        if output.exists():
-            if not settings.force:
-                raise FileExistsError(f"DLC output exists; use --force: {output}")
-            output.unlink()
         os.replace(partial, output)
         checksum_path = output.with_name(f"{output.name}.sha256")
         if checksum_path.exists():
@@ -1205,7 +1399,12 @@ def _pack_dlc_separate(
                 "checksum_generated": False,
                 "entitlement_label": label,
                 "runtime_supported": False,
-                "compression_level": settings.compression_level,
+                "output_format": settings.output_format,
+                "compression_level": (
+                    settings.compression_level
+                    if settings.output_format == "ffpfsc"
+                    else None
+                ),
                 "compression_workers": compression_workers,
                 "verification": verification,
             }
@@ -1218,6 +1417,10 @@ def build_game(
     title_id: str,
     inventory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if settings.output_format not in OUTPUT_FORMATS:
+        raise ValueError(f"unsupported output format: {settings.output_format}")
+    if settings.output_format == "exfat" and settings.keep_inner_image:
+        raise ValueError("--keep-inner-image applies only to FFPFSC output")
     configure_logging(settings, title_id)
     LOG.info("build started: %s", title_id)
     if inventory is None:
@@ -1236,7 +1439,10 @@ def build_game(
         if patches
         else base[0].get("app_version", "01.00")
     )
-    filename = f"{game['directory_name']} [v{version}].ffpfsc"
+    filename = (
+        f"{game['directory_name']} [v{version}]"
+        f"{_artifact_extension(settings.output_format)}"
+    )
     output = settings.output_dir / filename
     partial = output.with_name(f"{output.name}.partial")
     root_resolved = root.resolve(strict=False)
@@ -1271,19 +1477,38 @@ def build_game(
         partial.unlink()
     mkpfs = mkpfs_command(settings)
     log_path = settings.root / "logs" / "ps4ffpsc.log"
-    compression_workers = maximum_logical_cpu_count()
-    compression_arguments = mkpfs_compression_arguments(
-        settings,
-        compression_workers,
-    )
-    LOG.info(
-        "MkPFS compression: level %d, workers %d (all available logical CPUs)",
-        settings.compression_level,
-        compression_workers,
-    )
+    compression_workers: int | None = None
+    compression_workers_mode = "not_applicable"
+    compression_arguments: list[str] = []
+    if settings.output_format == "ffpfsc":
+        compression_workers = validate_compression_worker_count(
+            settings.compression_workers,
+            maximum_logical_cpu_count(),
+        )
+        compression_workers_mode = (
+            "automatic_half_available_logical_cpus"
+            if settings.compression_workers is None
+            else "selected"
+        )
+        compression_arguments = mkpfs_compression_arguments(
+            settings,
+            compression_workers,
+        )
+        LOG.info(
+            "MkPFS compression: level %d, workers %d (%s)",
+            settings.compression_level,
+            compression_workers,
+            compression_workers_mode,
+        )
+    else:
+        LOG.info("MkPFS output: uncompressed exFAT, cluster size 65536 bytes")
     inner_image: Path | None = None
-    if settings.keep_inner_image:
+    if settings.output_format == "ffpfsc" and settings.keep_inner_image:
         inner_image = output.with_name(f"{output.stem}.inner.exfat")
+        if inner_image.exists() and not settings.force:
+            raise FileExistsError(
+                f"inner image exists; use --force: {inner_image}"
+            )
         inner_partial = inner_image.with_name(f"{inner_image.name}.partial")
         if inner_partial.exists():
             inner_partial.unlink()
@@ -1300,10 +1525,6 @@ def build_game(
             ],
             log_path,
         )
-        if inner_image.exists():
-            if not settings.force:
-                raise FileExistsError(f"inner image exists; use --force: {inner_image}")
-            inner_image.unlink()
         os.replace(inner_partial, inner_image)
         command = [
             *mkpfs,
@@ -1321,28 +1542,29 @@ def build_game(
             str(partial),
         ]
     else:
-        command = [
-            *mkpfs,
-            "pack",
-            "folder",
-            "--no-adjust-output-file-extension",
-            "--version",
-            "PS5",
-            "--inode-bits",
-            "32",
-            *compression_arguments,
-            "--temp-folder",
-            str(settings.temp_dir),
-        ]
-        if settings.compat == "current-smp":
-            command.append("--require-game-files")
-        command += [str(app), str(partial)]
-    LOG.info("stage 3/5: creating compressed FFPFSC image")
+        command = _pack_directory_command(
+            settings,
+            mkpfs,
+            app,
+            partial,
+            compression_workers,
+            require_game_files=settings.compat == "current-smp",
+        )
+    LOG.info(
+        "stage 3/5: %s",
+        "creating compressed FFPFSC image"
+        if settings.output_format == "ffpfsc"
+        else "creating uncompressed exFAT image",
+    )
     _run_logged(command, log_path)
-    LOG.info("stage 4/5: verifying the container and required files")
-    verification = _verify_image(settings, partial, app, settings.compat)
-    if output.exists():
-        output.unlink()
+    LOG.info("stage 4/5: verifying the image and required files")
+    verification = _verify_image(
+        settings,
+        partial,
+        app,
+        settings.compat,
+        image_format=settings.output_format,
+    )
     os.replace(partial, output)
     dlc_artifacts: list[dict[str, Any]] = []
     if settings.include_dlc == "separate" and game["dlc"]:
@@ -1384,16 +1606,26 @@ def build_game(
         ],
         "inner_filesystem": "exfat",
         "kept_inner_image": str(inner_image) if inner_image else None,
-        "outer_container": "compressed_pfs",
-        "compression_level": settings.compression_level,
+        "output_format": settings.output_format,
+        "outer_container": (
+            "compressed_pfs"
+            if settings.output_format == "ffpfsc"
+            else None
+        ),
+        "compression_level": (
+            settings.compression_level
+            if settings.output_format == "ffpfsc"
+            else None
+        ),
         "compression_workers": compression_workers,
-        "compression_workers_mode": "maximum_available_logical_cpus",
+        "compression_workers_mode": compression_workers_mode,
         "extra_top_level_directory": False,
         "verification": verification,
         "static_shadowmount_compatible": settings.compat == "current-smp",
         "ps5_runtime_verified": False,
         "dlc_packaged": bool(game["dlc"]),
         "dlc_in_main_ffpfsc": False,
+        "dlc_in_main_artifact": False,
         "dlc_runtime_supported": False,
         "dlc_artifacts": dlc_artifacts,
         "dlc_runtime_reason": (
@@ -1408,9 +1640,9 @@ def build_game(
         "temporary_workspace_cleaned": False,
         "completed_at": utc_now(),
     }
-    manifest_path = output.with_suffix(".manifest.json")
+    manifest_path = _artifact_sidecar_path(output, ".manifest.json")
     atomic_write_json(manifest_path, artifact_manifest)
-    shadow_path = output.with_suffix(".shadowmount.txt")
+    shadow_path = _artifact_sidecar_path(output, ".shadowmount.txt")
     shadow_path.write_text(
         "\n".join(
             [
@@ -1429,8 +1661,18 @@ def build_game(
                     or "none"
                 ),
                 f"Compatibility: {settings.compat}",
-                f"Compression level: {settings.compression_level}",
-                f"Compression workers: {compression_workers} (maximum available logical CPUs)",
+                f"Output format: {settings.output_format}",
+                (
+                    f"Compression level: {settings.compression_level}"
+                    if settings.output_format == "ffpfsc"
+                    else "Compression: not applicable (raw exFAT)"
+                ),
+                (
+                    f"Compression workers: {compression_workers} "
+                    f"({compression_workers_mode})"
+                    if settings.output_format == "ffpfsc"
+                    else "Compression workers: not applicable"
+                ),
                 "Recommended USB path: /mnt/usb0/ps4ffpsc/" + output.name,
                 "manual.lst: /mnt/usb0/ps4ffpsc/" + output.name,
                 "Expected ShadowMountPlus checks: nested exFAT mount, root sce_sys/param.json, "
@@ -1457,7 +1699,14 @@ def build_game(
 def verify_artifact(settings: Settings, path: Path) -> dict[str, Any]:
     if not path.is_file():
         raise FileNotFoundError(path)
-    result = _verify_image(settings, path, None, settings.compat)
+    image_format = _detect_artifact_format(path)
+    result = _verify_image(
+        settings,
+        path,
+        None,
+        settings.compat,
+        image_format=image_format,
+    )
     result.update({"path": str(path), "sha256": sha256_file(path), "size": path.stat().st_size})
     return result
 
