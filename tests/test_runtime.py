@@ -135,7 +135,9 @@ def test_compression_worker_validation_enforces_available_range() -> None:
         runtime.validate_compression_worker_count(11, 10)
 
 
-def test_worker_process_group_configuration_is_platform_specific() -> None:
+def test_worker_process_group_configuration_is_platform_specific(
+    monkeypatch,
+) -> None:
     class FakeProcess:
         child_modifier = None
         windows_modifier = None
@@ -146,12 +148,19 @@ def test_worker_process_group_configuration_is_platform_specific() -> None:
         def setCreateProcessArgumentsModifier(self, modifier) -> None:
             self.windows_modifier = modifier
 
+    fake_setsid = lambda: None
+    monkeypatch.setattr(
+        runtime.os,
+        "setsid",
+        fake_setsid,
+        raising=False,
+    )
     posix_process = FakeProcess()
     assert runtime.configure_worker_process_group(
         posix_process,
         "darwin",
     )
-    assert posix_process.child_modifier is runtime.os.setsid
+    assert posix_process.child_modifier is fake_setsid
 
     windows_process = FakeProcess()
     assert runtime.configure_worker_process_group(
@@ -178,19 +187,21 @@ def test_posix_tree_termination_targets_the_worker_process_group(
         lambda process_id, selected_signal: calls.append(
             (process_id, selected_signal)
         ),
+        raising=False,
     )
 
     assert runtime.terminate_process_tree(
         1234,
-        force=True,
+        force=False,
         platform_name="darwin",
     )
-    assert calls == [(1234, runtime.signal.SIGKILL)]
+    assert calls == [(1234, runtime.signal.SIGTERM)]
 
 
 def test_process_tree_cancellation_stops_worker_and_child() -> None:
     process = QProcess()
-    if not runtime.configure_worker_process_group(process):
+    process_group_configured = runtime.configure_worker_process_group(process)
+    if sys.platform != "win32" and not process_group_configured:
         pytest.skip("QProcess process-group support is unavailable")
     job_handle = None
     if sys.platform == "win32":
