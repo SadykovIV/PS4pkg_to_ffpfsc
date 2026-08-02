@@ -104,6 +104,9 @@ def test_release_scripts_package_the_unified_current_release_notes() -> None:
 
 
 def test_experimental_dlc_build_inputs_are_pinned_and_attributed() -> None:
+    attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
+    assert "LICENSES/*.txt text eol=lf" in attributes
+
     csproj = (
         ROOT / "third_party" / "ps4_dlc_patch" / "ps4-dlc-patch.csproj"
     ).read_text(encoding="utf-8")
