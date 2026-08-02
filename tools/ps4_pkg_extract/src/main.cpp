@@ -19,6 +19,7 @@
 #include "common/utf8_path.h"
 #include "core/file_format/pkg.h"
 #include "core/file_format/psf.h"
+#include "dlc_metadata.h"
 
 namespace fs = std::filesystem;
 
@@ -244,6 +245,8 @@ struct Inspection {
     std::string system_version;
     std::string kind;
     std::optional<std::string> entitlement;
+    u32 pkg_content_type{};
+    std::optional<std::string_view> dlc_package_type;
 };
 
 static bool Inspect(const fs::path& path, Inspection& result, std::string& reason,
@@ -288,6 +291,9 @@ static bool Inspect(const fs::path& path, Inspection& result, std::string& reaso
     result.entitlement = EntitlementLabel(result.content_id);
 
     const auto header = result.pkg.GetPkgHeader();
+    result.pkg_content_type = static_cast<u32>(header.pkg_content_type);
+    result.dlc_package_type =
+        PS4FFPSC::DlcPackageTypeFor(result.pkg_content_type);
     const bool patch =
         PKG::isFlagSet(header.pkg_content_flags, PKGContentFlag::FIRST_PATCH) ||
         PKG::isFlagSet(header.pkg_content_flags, PKGContentFlag::SUBSEQUENT_PATCH) ||
@@ -339,7 +345,15 @@ static void PrintInspection(const fs::path& path, const Inspection& item) {
             first = false;
         }
     }
-    std::cout << "],\"kind\":\"" << item.kind << "\",\"entitlement_label\":";
+    std::cout << "],\"kind\":\"" << item.kind
+              << "\",\"pkg_content_type\":" << item.pkg_content_type
+              << ",\"dlc_package_type\":";
+    if (item.dlc_package_type) {
+        std::cout << '"' << *item.dlc_package_type << '"';
+    } else {
+        std::cout << "null";
+    }
+    std::cout << ",\"entitlement_label\":";
     if (item.entitlement) {
         std::cout << '"' << JsonEscape(*item.entitlement) << '"';
     } else {

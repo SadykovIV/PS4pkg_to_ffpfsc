@@ -60,7 +60,19 @@ def _common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--work-dir")
     parser.add_argument("--temp-dir")
     parser.add_argument("--compat", choices=["current-smp", "patched-smp"])
-    parser.add_argument("--include-dlc", choices=["auto", "bundle", "separate", "off"])
+    parser.add_argument(
+        "--dlc-mode",
+        choices=["off", "single-experimental"],
+        help=(
+            "DLC handling mode (default: off; single-experimental embeds "
+            "selected DLC into the game image)"
+        ),
+    )
+    parser.add_argument(
+        "--include-dlc",
+        choices=["auto", "bundle", "separate", "off"],
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument(
         "--output-format",
         choices=["ffpfsc", "exfat"],

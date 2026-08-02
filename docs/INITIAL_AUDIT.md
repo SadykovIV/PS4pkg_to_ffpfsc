@@ -1,5 +1,8 @@
 # Initial audit
 
+**Languages:** **English** · [Русский](ru/INITIAL_AUDIT.md) ·
+[Index](README.md)
+
 Audit date: 2026-07-26.
 
 ## What was present
@@ -59,4 +62,3 @@ reject absolute separators, controls, `.`, and `..`. Service dirents remain vali
   `verify`, `tree --deep`, and `unpack --deep` provide the required checks.
 
 Licenses and attribution are recorded in `THIRD_PARTY_NOTICES.md` and `LICENSES/`.
-

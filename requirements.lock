@@ -4,5 +4,5 @@
 cryptography==49.0.0
 zlib-ng==1.0.0
 isal==1.8.0
-PySide6-Essentials==6.11.1
-shiboken6==6.11.1
+PySide6-Essentials==6.9.3
+shiboken6==6.9.3

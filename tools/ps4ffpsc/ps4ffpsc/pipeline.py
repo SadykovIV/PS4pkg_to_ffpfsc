@@ -14,6 +14,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from .dlc_embed import (
+    DLC_MODE_OFF,
+    DLC_MODE_SINGLE_EXPERIMENTAL,
+    DLC_MODES,
+    embed_experimental_dlc,
+)
 from .inventory import (
     find_extractor,
     inspect_package,
@@ -22,7 +28,7 @@ from .inventory import (
     scan_dump_directories,
     scan_packages,
 )
-from .npbind import validate_npbind
+from .npbind import inspect_npbind, repair_npbind_footer, validate_npbind
 from .runtime import (
     is_frozen,
     maximum_logical_cpu_count,
@@ -63,7 +69,7 @@ class Settings:
     work_dir: Path
     temp_dir: Path
     compat: str = "current-smp"
-    include_dlc: str = "auto"
+    dlc_mode: str = DLC_MODE_OFF
     jobs: int = 2
     compression_level: int = 7
     compression_workers: int | None = None
@@ -142,6 +148,38 @@ class Settings:
             raise ValueError(
                 "--dump-dir cannot be combined with --pkg-file or --pkg-dir"
             )
+        cli_dlc_mode = getattr(args, "dlc_mode", None)
+        cli_legacy_dlc_mode = getattr(args, "include_dlc", None)
+        if cli_dlc_mode is not None and cli_legacy_dlc_mode is not None:
+            raise ValueError("--dlc-mode cannot be combined with --include-dlc")
+        if cli_dlc_mode is not None:
+            requested_dlc_mode = cli_dlc_mode
+            legacy_dlc_mode = None
+        elif cli_legacy_dlc_mode is not None:
+            requested_dlc_mode = None
+            legacy_dlc_mode = cli_legacy_dlc_mode
+        else:
+            requested_dlc_mode = shadow.get("dlc_mode")
+            legacy_dlc_mode = (
+                None
+                if requested_dlc_mode is not None
+                else shadow.get("include_dlc")
+            )
+        if requested_dlc_mode is None:
+            if legacy_dlc_mode is None or legacy_dlc_mode == "off":
+                requested_dlc_mode = DLC_MODE_OFF
+            elif legacy_dlc_mode == "bundle":
+                requested_dlc_mode = DLC_MODE_SINGLE_EXPERIMENTAL
+            else:
+                raise ValueError(
+                    "legacy DLC mode auto/separate is no longer supported; "
+                    "use --dlc-mode off or --dlc-mode single-experimental"
+                )
+        requested_dlc_mode = str(requested_dlc_mode)
+        if requested_dlc_mode not in DLC_MODES:
+            raise ValueError(
+                "DLC mode must be one of: " + ", ".join(sorted(DLC_MODES))
+            )
         return cls(
             root=root,
             pkg_dir=resolve("pkg_dir", "pkg"),
@@ -150,7 +188,7 @@ class Settings:
             work_dir=resolve("work_dir", "work"),
             temp_dir=temp_path,
             compat=getattr(args, "compat", None) or shadow.get("compatibility", "current-smp"),
-            include_dlc=getattr(args, "include_dlc", None) or shadow.get("include_dlc", "auto"),
+            dlc_mode=requested_dlc_mode,
             jobs=max(1, int(getattr(args, "jobs", None) or extract.get("jobs", 2))),
             compression_level=compression_level,
             compression_workers=compression_workers,
@@ -307,6 +345,41 @@ def package_destination(root: Path, package: dict[str, Any]) -> Path:
         label = package.get("entitlement_label") or f"UNKNOWN-{short_hash}"
         return root / "packages" / "dlc" / label / short_hash
     return root / "packages" / "unknown" / short_hash
+
+
+def _selected_dlc_packages(
+    settings: Settings,
+    game: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if settings.dlc_mode != DLC_MODE_SINGLE_EXPERIMENTAL:
+        return []
+    selected = [
+        item
+        for item in game.get("dlc", [])
+        if item.get("supported", True) and not item.get("duplicate_of")
+    ]
+    invalid = [
+        item
+        for item in selected
+        if item.get("validation_errors")
+    ]
+    if invalid:
+        details = "; ".join(
+            f"{item.get('path')}: {', '.join(map(str, item['validation_errors']))}"
+            for item in invalid
+        )
+        raise RuntimeError(
+            "selected experimental DLC failed inventory validation: " + details
+        )
+    return selected
+
+
+def _dlc_staging_manifest(root: Path) -> list[dict[str, Any]]:
+    return [
+        entry
+        for entry in tree_stat_manifest(root)
+        if entry["path"] != "ps4ffpsc-dlc.json"
+    ]
 
 
 def _disk_required(packages: list[dict[str, Any]], multiplier: float) -> int:
@@ -482,7 +555,11 @@ def unpack_game(settings: Settings, inventory: dict[str, Any], title_id: str) ->
     root.mkdir(parents=True, exist_ok=True)
     candidates = [
         item
-        for item in [*game["base"], *ordered_patches(game), *game["dlc"]]
+        for item in [
+            *game["base"],
+            *ordered_patches(game),
+            *_selected_dlc_packages(settings, game),
+        ]
         if item.get("supported") and not item.get("duplicate_of")
     ]
     selected = candidates
@@ -504,7 +581,7 @@ def unpack_game(settings: Settings, inventory: dict[str, Any], title_id: str) ->
             npbind_validation: dict[str, Any] | None = None
             npbind = destination / "sce_sys" / "npbind.dat"
             if npbind.is_file():
-                npbind_validation = validate_npbind(npbind)
+                npbind_validation = inspect_npbind(npbind)
             record = {
                 "status": "verified_source_tree",
                 "source_path": package["path"],
@@ -875,7 +952,7 @@ def merge_game(
     if len(base) != 1 or game["conflicts"]:
         raise RuntimeError(f"{title_id} has no unambiguous base package")
     patches = ordered_patches(game)
-    dlc = [item for item in game["dlc"] if not item.get("duplicate_of")]
+    dlc = _selected_dlc_packages(settings, game)
     merged = root / "merged"
     app = merged / "app"
     if settings.dry_run:
@@ -947,6 +1024,22 @@ def merge_game(
             case_map,
         )
 
+    npbind_footer_repair: dict[str, Any] | None = None
+    merged_npbind = partial / "sce_sys" / "npbind.dat"
+    if (
+        merged_npbind.is_file()
+        and any(
+            item.get("source_kind") == "dump_tree"
+            for item in [base[0], *patches]
+        )
+    ):
+        npbind_footer_repair = repair_npbind_footer(merged_npbind)
+        if npbind_footer_repair.get("repaired"):
+            LOG.warning(
+                "repaired npbind.dat SHA-1 footer in the temporary merged copy; "
+                "the unpacked source was not modified"
+            )
+
     eboot = partial / "eboot.bin"
     param_sfo = partial / "sce_sys" / "param.sfo"
     if not eboot.is_file() or not param_sfo.is_file():
@@ -982,40 +1075,42 @@ def merge_game(
     elif compat != "patched-smp":
         raise ValueError(f"unsupported compatibility mode: {compat}")
 
-    addcont_partial.mkdir(parents=True)
     dlc_reports: list[dict[str, Any]] = []
     dlc_labels: dict[str, dict[str, Any]] = {}
-    for item in dlc:
-        label = item.get("entitlement_label") or f"UNKNOWN-{item['source_id'][-12:]}"
-        previous_dlc = dlc_labels.get(label)
-        if previous_dlc is not None:
-            raise RuntimeError(
-                f"conflicting DLC entitlement label {label}: "
-                f"{previous_dlc['path']} vs {item['path']}"
-            )
-        dlc_labels[label] = item
-        source = package_destination(root, item)
-        target = addcont_partial / label
-        target.mkdir(parents=True)
-        dlc_changes: list[dict[str, Any]] = []
-        merge_package(source, target, item, dlc_changes, {})
-        dlc_manifest = tree_stat_manifest(target)
-        metadata = {
-            "title_id": title_id,
-            "content_id": item.get("content_id"),
-            "entitlement_label": label,
-            "name": item.get("title"),
-            "version": item.get("app_version") or item.get("version"),
-            "source_pkg_id": item["source_id"],
-            "extracted_tree_signature": tree_stat_signature(dlc_manifest),
-            "extracted_file_count": len(dlc_manifest),
-            "runtime_support_status": "packaged_not_runtime_verified",
-        }
-        atomic_write_json(target / "ps4ffpsc-dlc.json", metadata)
-        dlc_reports.append(metadata)
+    if dlc:
+        addcont_partial.mkdir(parents=True)
+        for item in dlc:
+            label = item.get("entitlement_label") or f"UNKNOWN-{item['source_id'][-12:]}"
+            previous_dlc = dlc_labels.get(label)
+            if previous_dlc is not None:
+                raise RuntimeError(
+                    f"conflicting DLC entitlement label {label}: "
+                    f"{previous_dlc['path']} vs {item['path']}"
+                )
+            dlc_labels[label] = item
+            source = package_destination(root, item)
+            target = addcont_partial / label
+            target.mkdir(parents=True)
+            dlc_changes: list[dict[str, Any]] = []
+            merge_package(source, target, item, dlc_changes, {})
+            dlc_manifest = _dlc_staging_manifest(target)
+            metadata = {
+                "title_id": title_id,
+                "content_id": item.get("content_id"),
+                "entitlement_label": label,
+                "name": item.get("title"),
+                "version": item.get("app_version") or item.get("version"),
+                "source_pkg_id": item["source_id"],
+                "extracted_tree_signature": tree_stat_signature(dlc_manifest),
+                "extracted_file_count": len(dlc_manifest),
+                "runtime_support_status": "staged_for_optional_experimental_mode",
+            }
+            atomic_write_json(target / "ps4ffpsc-dlc.json", metadata)
+            dlc_reports.append(metadata)
 
     os.replace(partial, app)
-    os.replace(addcont_partial, addcont)
+    if dlc:
+        os.replace(addcont_partial, addcont)
     report = {
         "schema_version": 1,
         "extractor_revision": EXTRACTOR_REVISION,
@@ -1037,19 +1132,34 @@ def merge_game(
         "mirrored_user_defined_params": {
             f"userDefinedParam{index}": values[f"USER_DEFINED_PARAM_{index}"]
             for index in range(1, 5)
-            if isinstance(values.get(f"USER_DEFINED_PARAM_{index}"), int)
+            if compat == "current-smp"
+            and isinstance(values.get(f"USER_DEFINED_PARAM_{index}"), int)
             and values[f"USER_DEFINED_PARAM_{index}"] != 0
         },
+        "mirrored_localized_titles": {
+            f"TITLE_{index:02d}": values[f"TITLE_{index:02d}"]
+            for index in range(30)
+            if compat == "current-smp"
+            and isinstance(values.get(f"TITLE_{index:02d}"), str)
+            and values[f"TITLE_{index:02d}"].strip()
+        },
         "param_sfo_preserved": True,
+        "npbind_footer_repair": npbind_footer_repair,
+        "unpacked_source_preserved": True,
         "static_shadowmount_compatible": compat == "current-smp",
         "static_shadowmount_checks_passed": compat == "current-smp",
         "ps5_runtime_verified": False,
         "dlc": dlc_reports,
-        "dlc_packaged": bool(dlc_reports),
+        "dlc_mode": settings.dlc_mode,
+        "dlc_staged_count": len(dlc_reports),
+        "dlc_packaged": False,
+        "dlc_embedding": None,
         "dlc_runtime_supported": False,
         "dlc_runtime_reason": (
-            "ShadowMountPlus has no verified PS4 addcont registration/mount workflow."
+            "DLC was staged for the experimental single-image mode."
             if dlc_reports
+            else "DLC was excluded because experimental mode is disabled."
+            if game["dlc"]
             else "No DLC packages found."
         ),
         "warnings": warnings,
@@ -1100,6 +1210,52 @@ def _resume_merged_game(
             or report.get("extractor_revision") != EXTRACTOR_REVISION
         ):
             return None
+        saved_dlc_mode = str(report.get("dlc_mode") or DLC_MODE_OFF)
+        if saved_dlc_mode not in DLC_MODES:
+            return None
+        if saved_dlc_mode != settings.dlc_mode:
+            return None
+        if saved_dlc_mode == DLC_MODE_SINGLE_EXPERIMENTAL:
+            embedding = report.get("dlc_embedding")
+            embedded = isinstance(embedding, dict) and embedding.get("applied")
+            selected_dlc = _selected_dlc_packages(settings, game)
+            if not embedded and selected_dlc:
+                addcont = root / "merged" / "addcont"
+                labels = {
+                    str(item.get("entitlement_label") or "")
+                    for item in selected_dlc
+                }
+                reported_entries = report.get("dlc")
+                reported_by_label = {
+                    str(entry.get("entitlement_label") or ""): entry
+                    for entry in reported_entries
+                    if isinstance(entry, dict)
+                } if isinstance(reported_entries, list) else {}
+                if (
+                    not addcont.is_dir()
+                    or report.get("dlc_staged_count") != len(selected_dlc)
+                    or not labels
+                    or set(reported_by_label) != labels
+                ):
+                    return None
+                actual_labels = {
+                    entry.name
+                    for entry in addcont.iterdir()
+                    if entry.is_dir() and not entry.is_symlink()
+                }
+                if actual_labels != labels:
+                    return None
+                for label in labels:
+                    target = addcont / label
+                    current_manifest = _dlc_staging_manifest(target)
+                    saved_entry = reported_by_label[label]
+                    if (
+                        tree_stat_signature(current_manifest)
+                        != saved_entry.get("extracted_tree_signature")
+                        or len(current_manifest)
+                        != saved_entry.get("extracted_file_count")
+                    ):
+                        return None
         if expected_patch_plan:
             if (
                 saved_patch_plan != expected_patch_plan
@@ -1119,9 +1275,19 @@ def _resume_merged_game(
         }
         current_packages = [
             item
-            for item in [*game["base"], *ordered_patches(game), *game["dlc"]]
+            for item in [
+                *game["base"],
+                *ordered_patches(game),
+                *_selected_dlc_packages(settings, game),
+            ]
             if item.get("supported") and not item.get("duplicate_of")
         ]
+        current_package_paths = {
+            str(Path(item["path"]).resolve())
+            for item in current_packages
+        }
+        if set(saved_packages) != current_package_paths:
+            return None
         for package in current_packages:
             source = Path(package["path"]).resolve()
             saved = saved_packages.get(str(source))
@@ -1609,80 +1775,6 @@ def _pack_directory_command(
     return [*command, str(source), str(destination)]
 
 
-def _pack_dlc_separate(
-    settings: Settings,
-    game: dict[str, Any],
-    merged_root: Path,
-    mkpfs: list[str],
-    log_path: Path,
-    compression_workers: int | None,
-) -> list[dict[str, Any]]:
-    artifacts: list[dict[str, Any]] = []
-    staged_paths: list[Path] = []
-    try:
-        for item in (
-            entry for entry in game["dlc"] if not entry.get("duplicate_of")
-        ):
-            label = item.get("entitlement_label") or (
-                f"UNKNOWN-{item['source_id'][-12:]}"
-            )
-            source = merged_root / "addcont" / label
-            if not source.is_dir():
-                raise FileNotFoundError(
-                    f"merged DLC source is missing: {source}"
-                )
-            output = settings.output_dir / (
-                f"{game['directory_name']} [DLC {label}]"
-                f"{_artifact_extension(settings.output_format)}"
-            )
-            if _path_exists(output) and not settings.force:
-                raise FileExistsError(
-                    f"DLC output exists; use --force: {output}"
-                )
-            partial = output.with_name(f"{output.name}.partial")
-            if partial.exists():
-                partial.unlink()
-            staged_paths.append(partial)
-            command = _pack_directory_command(
-                settings,
-                mkpfs,
-                source,
-                partial,
-                compression_workers,
-            )
-            _run_logged(command, log_path)
-            verification = _verify_image(
-                settings,
-                partial,
-                source,
-                "patched-smp",
-                required_files=["ps4ffpsc-dlc.json"],
-                image_format=settings.output_format,
-            )
-            artifacts.append(
-                {
-                    "path": str(output),
-                    "_staged_path": str(partial),
-                    "sha256": None,
-                    "checksum_generated": False,
-                    "entitlement_label": label,
-                    "runtime_supported": False,
-                    "output_format": settings.output_format,
-                    "compression_level": (
-                        settings.compression_level
-                        if settings.output_format == "ffpfsc"
-                        else None
-                    ),
-                    "compression_workers": compression_workers,
-                    "verification": verification,
-                }
-            )
-    except Exception:
-        _cleanup_staged_files(staged_paths)
-        raise
-    return artifacts
-
-
 def _publish_build_artifacts(
     settings: Settings,
     title_id: str,
@@ -1696,18 +1788,9 @@ def _publish_build_artifacts(
     verification: dict[str, Any],
     compression_workers: int | None,
     compression_workers_mode: str,
-    dlc_artifacts: list[dict[str, Any]],
+    dlc_embedding: dict[str, Any] | None,
 ) -> dict[str, Any]:
     staged_paths = [staged_output]
-    dlc_publications: list[tuple[Path, Path]] = []
-    for artifact in dlc_artifacts:
-        staged_value = artifact.pop("_staged_path", None)
-        if not staged_value:
-            raise RuntimeError("DLC artifact is missing its staged path")
-        staged = Path(staged_value)
-        destination = Path(artifact["path"])
-        staged_paths.append(staged)
-        dlc_publications.append((staged, destination))
     if staged_inner_image is not None:
         staged_paths.append(staged_inner_image)
 
@@ -1724,6 +1807,8 @@ def _publish_build_artifacts(
 
     try:
         checksum_path = output.with_name(f"{output.name}.sha256")
+        dlc_applied = bool(dlc_embedding and dlc_embedding.get("applied"))
+        selected_dlc = _selected_dlc_packages(settings, game)
         artifact_manifest = {
             "schema_version": 1,
             "extractor_revision": EXTRACTOR_REVISION,
@@ -1735,7 +1820,7 @@ def _publish_build_artifacts(
             "title": game["title"],
             "app_version": version,
             "compatibility": settings.compat,
-            "include_dlc": settings.include_dlc,
+            "dlc_mode": settings.dlc_mode,
             "patch_plan": patch_build_plan(game),
             "source_packages": [
                 {
@@ -1752,7 +1837,7 @@ def _publish_build_artifacts(
                 for item in [
                     *game["base"],
                     *ordered_patches(game),
-                    *game["dlc"],
+                    *selected_dlc,
                 ]
                 if not item.get("duplicate_of")
             ],
@@ -1776,18 +1861,21 @@ def _publish_build_artifacts(
             "static_shadowmount_compatible": settings.compat == "current-smp",
             "ps5_runtime_verified": False,
             "dlc_detected": bool(game["dlc"]),
-            "dlc_packaged": bool(dlc_artifacts),
-            "dlc_in_main_ffpfsc": False,
-            "dlc_in_main_artifact": False,
+            "dlc_packaged": dlc_applied,
+            "dlc_experimental": settings.dlc_mode
+            == DLC_MODE_SINGLE_EXPERIMENTAL,
+            "dlc_in_main_ffpfsc": dlc_applied
+            and settings.output_format == "ffpfsc",
+            "dlc_in_main_artifact": dlc_applied,
             "dlc_runtime_supported": False,
-            "dlc_artifacts": dlc_artifacts,
+            "dlc_embedding": dlc_embedding,
+            "dlc_artifacts": [],
             "dlc_runtime_reason": (
-                "Separate DLC images are verified but PS4 addcont mount/registration is not."
-                if dlc_artifacts
-                else "Bundle mode requires a companion ShadowMountPlus implementation and was not emitted."
-                if game["dlc"] and settings.include_dlc == "bundle"
-                else "DLC was prepared during the verified merge; temporary staging was removed."
-                if game["dlc"]
+                "DLC is embedded in the game image by an experimental method; "
+                "console runtime behavior is not guaranteed."
+                if dlc_applied
+                else "DLC was detected but explicitly excluded from the artifact."
+                if game["dlc"] and settings.dlc_mode == DLC_MODE_OFF
                 else "No DLC packages found."
             ),
             "temporary_workspace_cleaned": True,
@@ -1809,7 +1897,7 @@ def _publish_build_artifacts(
                 + (
                     ", ".join(
                         item.get("entitlement_label") or "unknown"
-                        for item in game["dlc"]
+                        for item in selected_dlc
                     )
                     or "none"
                 ),
@@ -1833,16 +1921,12 @@ def _publish_build_artifacts(
                 "static_shadowmount_compatible="
                 + str(settings.compat == "current-smp").lower(),
                 "ps5_runtime_verified=false",
-                (
-                    "DLC artifacts: "
-                    + ", ".join(
-                        Path(item["path"]).name for item in dlc_artifacts
-                    )
-                    if dlc_artifacts
-                    else "DLC artifacts: none"
-                ),
-                "DLC runtime support is not verified; addcont registration "
-                "requires runtime support.",
+                f"DLC mode: {settings.dlc_mode}",
+                "DLC separate artifacts: none",
+                "DLC embedded in main artifact: " + str(dlc_applied).lower(),
+                "DLC mode is experimental; runtime compatibility is not guaranteed."
+                if settings.dlc_mode == DLC_MODE_SINGLE_EXPERIMENTAL
+                else "DLC was not included in the artifact.",
                 "",
             ]
         )
@@ -1855,16 +1939,8 @@ def _publish_build_artifacts(
 
         operations: list[tuple[Path | None, Path]] = [
             (None, checksum_path),
-            *[
-                (
-                    None,
-                    destination.with_name(f"{destination.name}.sha256"),
-                )
-                for _staged, destination in dlc_publications
-            ],
             (staged_manifest, manifest_path),
             (staged_shadow, shadow_path),
-            *dlc_publications,
         ]
         if inner_image is not None and staged_inner_image is not None:
             operations.append((staged_inner_image, inner_image))
@@ -1896,6 +1972,8 @@ def build_game(
 ) -> dict[str, Any]:
     if settings.output_format not in OUTPUT_FORMATS:
         raise ValueError(f"unsupported output format: {settings.output_format}")
+    if settings.dlc_mode not in DLC_MODES:
+        raise ValueError(f"unsupported DLC mode: {settings.dlc_mode}")
     if settings.output_format == "exfat" and settings.keep_inner_image:
         raise ValueError("--keep-inner-image applies only to FFPFSC output")
     configure_logging(settings, title_id)
@@ -1948,6 +2026,53 @@ def build_game(
         return merge_report
     app = root / "merged" / "app"
     version = merge_report["latest_app_version"]
+    dlc_embedding: dict[str, Any] | None = None
+    selected_dlc = _selected_dlc_packages(settings, game)
+    if settings.dlc_mode == DLC_MODE_SINGLE_EXPERIMENTAL:
+        saved_embedding = merge_report.get("dlc_embedding")
+        if (
+            merge_report.get("dlc_mode") == DLC_MODE_SINGLE_EXPERIMENTAL
+            and isinstance(saved_embedding, dict)
+            and saved_embedding.get("applied")
+        ):
+            dlc_embedding = saved_embedding
+            LOG.info("reusing verified experimental single-image DLC layout")
+        elif selected_dlc:
+            LOG.info(
+                "stage 2/5: applying experimental single-image DLC layout"
+            )
+            dlc_embedding = embed_experimental_dlc(
+                app,
+                root / "merged" / "addcont",
+                selected_dlc,
+                root / "dlc-single-work",
+                settings.resource_root or settings.root,
+            )
+            merge_report["dlc_mode"] = DLC_MODE_SINGLE_EXPERIMENTAL
+            merge_report["dlc_embedding"] = dlc_embedding
+            merge_report["dlc_packaged"] = bool(
+                dlc_embedding.get("applied")
+            )
+            merge_report["dlc_runtime_supported"] = False
+            merge_report["dlc_runtime_reason"] = (
+                "Experimental single-image layout created; console runtime "
+                "behavior is not guaranteed."
+            )
+            merge_report["merged_tree_signature"] = tree_stat_signature(app)
+            merge_report["dlc_embedded_at"] = utc_now()
+            atomic_write_json(
+                root / "reports" / "merge_report.json",
+                merge_report,
+            )
+        else:
+            dlc_embedding = {
+                "mode": DLC_MODE_SINGLE_EXPERIMENTAL,
+                "experimental": True,
+                "applied": False,
+                "dlc_count": 0,
+                "runtime_verified": False,
+                "entries": [],
+            }
     if partial.exists():
         partial.unlink()
     mkpfs = mkpfs_command(settings)
@@ -2047,16 +2172,6 @@ def build_game(
             settings.compat,
             image_format=settings.output_format,
         )
-        dlc_artifacts: list[dict[str, Any]] = []
-        if settings.include_dlc in {"auto", "separate"} and game["dlc"]:
-            dlc_artifacts = _pack_dlc_separate(
-                settings,
-                game,
-                root / "merged",
-                mkpfs,
-                log_path,
-                compression_workers,
-            )
         LOG.info("stage 5/5: publishing output and cleaning temporary files")
         return _publish_build_artifacts(
             settings,
@@ -2071,7 +2186,7 @@ def build_game(
             verification,
             compression_workers,
             compression_workers_mode,
-            dlc_artifacts,
+            dlc_embedding,
         )
     except Exception:
         _cleanup_staged_files(staged_build_paths)

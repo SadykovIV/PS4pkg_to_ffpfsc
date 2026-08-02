@@ -13,7 +13,7 @@ apply_all_patches = true
 
 [shadowmount]
 compatibility = "current-smp"
-include_dlc = "auto"
+dlc_mode = "off"
 
 [pack]
 format = "ffpfsc"

@@ -30,6 +30,102 @@ def test_build_parser_accepts_full_mkpfs_compression_range(
     assert settings.compression_workers is None
 
 
+def test_build_parser_accepts_canonical_and_legacy_dlc_options() -> None:
+    parser = cli.build_parser()
+
+    canonical = parser.parse_args(
+        ["build", "CUSA12345", "--dlc-mode", "single-experimental"]
+    )
+    assert canonical.dlc_mode == "single-experimental"
+    assert canonical.include_dlc is None
+
+    legacy = parser.parse_args(
+        ["build", "CUSA12345", "--include-dlc", "bundle"]
+    )
+    assert legacy.dlc_mode is None
+    assert legacy.include_dlc == "bundle"
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            ["build", "CUSA12345", "--dlc-mode", "separate"]
+        )
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected_mode"),
+    [
+        (["build", "CUSA12345"], "off"),
+        (["build", "CUSA12345", "--dlc-mode", "off"], "off"),
+        (
+            ["build", "CUSA12345", "--dlc-mode", "single-experimental"],
+            "single-experimental",
+        ),
+        (["build", "CUSA12345", "--include-dlc", "off"], "off"),
+        (
+            ["build", "CUSA12345", "--include-dlc", "bundle"],
+            "single-experimental",
+        ),
+    ],
+)
+def test_settings_load_maps_canonical_and_legacy_dlc_modes(
+    tmp_path: Path,
+    arguments: list[str],
+    expected_mode: str,
+) -> None:
+    args = cli.build_parser().parse_args(arguments)
+
+    settings = Settings.load(tmp_path, args, tmp_path)
+
+    assert settings.dlc_mode == expected_mode
+
+
+def test_legacy_cli_dlc_mode_overrides_canonical_config(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "ps4ffpsc.toml").write_text(
+        '[shadowmount]\ndlc_mode = "off"\n',
+        encoding="utf-8",
+    )
+    args = cli.build_parser().parse_args(
+        ["build", "CUSA12345", "--include-dlc", "bundle"]
+    )
+
+    settings = Settings.load(tmp_path, args, tmp_path)
+
+    assert settings.dlc_mode == "single-experimental"
+
+
+@pytest.mark.parametrize("legacy_mode", ["auto", "separate"])
+def test_settings_load_rejects_removed_legacy_dlc_modes(
+    tmp_path: Path,
+    legacy_mode: str,
+) -> None:
+    args = cli.build_parser().parse_args(
+        ["build", "CUSA12345", "--include-dlc", legacy_mode]
+    )
+
+    with pytest.raises(ValueError, match="no longer supported"):
+        Settings.load(tmp_path, args, tmp_path)
+
+
+def test_settings_load_rejects_conflicting_dlc_arguments(
+    tmp_path: Path,
+) -> None:
+    args = cli.build_parser().parse_args(
+        [
+            "build",
+            "CUSA12345",
+            "--dlc-mode",
+            "off",
+            "--include-dlc",
+            "bundle",
+        ]
+    )
+
+    with pytest.raises(ValueError, match="cannot be combined"):
+        Settings.load(tmp_path, args, tmp_path)
+
+
 def test_build_parser_accepts_output_format_and_bounded_workers(
     tmp_path: Path,
 ) -> None:

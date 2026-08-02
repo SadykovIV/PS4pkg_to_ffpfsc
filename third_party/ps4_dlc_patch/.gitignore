@@ -1,0 +1,16 @@
+bin/
+obj/
+publish/
+temp/
+*.a
+*.dll
+*.dylib
+*.exe
+*.elf
+*.o
+*.oelf
+*.pdb
+*.prx
+*.so
+*.dSYM/
+*.partial

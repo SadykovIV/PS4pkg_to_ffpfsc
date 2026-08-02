@@ -11,6 +11,56 @@ self-contained and require neither Python nor external applications.
 
 ## Русский
 
+### 0.2.8
+
+#### Добавлено
+
+- Экспериментальный режим единого образа для выбранных DLC. Он отключён по
+  умолчанию и должен включаться явно; обычная сборка base + patch остаётся
+  безопасным стандартным режимом.
+- Для совместимых игр DLC подготавливаются внутри консолидированного дерева
+  `/app0`, а необходимые изменения применяются только к временным копиям
+  игровых файлов. Исходные PKG и выбранное распакованное дерево не меняются.
+- Manifest явно отделяет успешную статическую сборку от проверки на консоли:
+  экспериментальный результат не считается рабочим на PS5 до аппаратного
+  теста.
+- Для выбранного распакованного дерева добавлено безопасное автоисправление
+  `npbind.dat`: при полностью корректной структуре заменяется только неверный
+  20-байтовый SHA-1-футер во временной объединённой копии. Исходное дерево не
+  изменяется.
+
+#### Исправлено
+
+- `param.json` больше не сводит локализации игры только к `en-US`: все
+  присутствующие в итоговом `param.sfo` поля `TITLE_00…29` переносятся в
+  соответствующие locale-записи с сохранением других существующих метаданных.
+  Это устраняет потерю русских, немецких и других локализованных названий и
+  языковых указателей при подготовке образа.
+- DLC больше не накладывается напрямую поверх корня игры: пакетные
+  `sce_sys/param.sfo`, лицензии и другие envelope-метаданные дополнения не
+  могут заменить идентичность base/patch.
+- Полностью одинаковые DLC исключаются до подготовки единого образа, поэтому
+  дубликат entitlement не создаёт повторную запись.
+- Экспериментальная функция больше не описывается как гарантированная
+  регистрация DLC: совместимость зависит от конкретной игры, типа дополнения
+  и используемого игрой API.
+- Данные права DLC передаются локальному вспомогательному процессу через
+  стандартный ввод и больше не записываются во временный JSON, журнал или
+  manifest.
+- Сборка macOS arm64 больше не наследует минимальную версию системы от
+  установленного Homebrew Python или Crypto++. Релиз закреплён на официальном
+  Python 3.13.14, PySide6/shiboken6 6.9.3 и Crypto++ 8.9.0, собранной из
+  проверенного архива исходников для macOS 13.0. Финальный аудит отклоняет
+  любой Mach-O, требующий более новую систему.
+
+#### Проверено
+
+- Эталонный набор Beat Saber CUSA12878: из 246 DLC исключён один точный
+  дубликат, 245 уникальных дополнений подготовлены в одном тестовом образе.
+- Тестовый образ прошёл MkPFS-проверку, глубокое извлечение и точную сверку
+  2 032 файлов и 277 каталогов. Это подтверждает целостность контейнера, но не
+  гарантирует обнаружение DLC или запуск игры на PS5.
+
 ### 0.2.7
 
 #### Добавлено
@@ -210,6 +260,54 @@ self-contained and require neither Python nor external applications.
 ---
 
 ## English
+
+### 0.2.8
+
+#### Added
+
+- An experimental single-image mode for selected DLC. It is disabled by
+  default and must be enabled explicitly; the ordinary base + patch build
+  remains the safe default.
+- For compatible games, DLC is prepared inside the consolidated `/app0` tree,
+  and any required changes are applied only to temporary copies of game files.
+  Source PKGs and a selected unpacked tree remain unchanged.
+- The manifest explicitly separates a successful static build from console
+  verification: an experimental result is not treated as working on PS5 until
+  it has been tested on hardware.
+- A selected unpacked tree now has safe automatic `npbind.dat` repair: when its
+  complete structure is valid, only an incorrect 20-byte SHA-1 footer in the
+  temporary merged copy is replaced. The source tree remains unchanged.
+
+#### Fixed
+
+- `param.json` no longer reduces game localization to `en-US`: every
+  `TITLE_00…29` value present in the final `param.sfo` is projected into its
+  matching locale entry while other existing metadata is preserved. This
+  prevents Russian, German, and other localized titles and language hints from
+  being discarded during image preparation.
+- DLC is no longer overlaid directly onto the game root: add-on
+  `sce_sys/param.sfo`, license files, and other package-envelope metadata cannot
+  replace the base/patch application identity.
+- Byte-identical DLC packages are excluded before preparing the single image,
+  preventing a duplicate entitlement entry.
+- The experimental feature is no longer described as guaranteed DLC
+  registration: compatibility depends on the game, add-on type, and API path
+  used by that game.
+- DLC entitlement data is passed to the local helper through standard input
+  and is no longer written to a temporary JSON file, log, or manifest.
+- The macOS arm64 build no longer inherits its minimum OS from the installed
+  Homebrew Python or Crypto++ bottle. The release is pinned to official Python
+  3.13.14, PySide6/shiboken6 6.9.3, and Crypto++ 8.9.0 built from a verified
+  source archive for macOS 13.0. The final audit rejects every Mach-O that
+  requires a newer system.
+
+#### Verified
+
+- Beat Saber CUSA12878 reference set: one exact duplicate was removed from 246
+  DLC packages and 245 unique add-ons were prepared in one test image.
+- The test image passed MkPFS verification, deep extraction, and exact
+  comparison of 2,032 files and 277 directories. This proves container
+  integrity, not DLC discovery or game launch on PS5.
 
 ### 0.2.7
 

@@ -1,5 +1,6 @@
 param(
-    [string]$VcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
+    [string]$VcpkgRoot = $env:VCPKG_INSTALLATION_ROOT,
+    [string]$DlcTemplatePath = $env:PS4FFPSC_DLC_TEMPLATE
 )
 
 $ErrorActionPreference = "Stop"
@@ -9,7 +10,7 @@ $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $BuildRoot = Join-Path $ProjectRoot "build-release-windows"
 $ReleaseRoot = Join-Path $ProjectRoot "release"
 $AppPath = Join-Path $BuildRoot "dist\PS4 FFPFSC"
-$Version = "0.2.7"
+$Version = "0.2.8"
 
 if (-not $IsWindows) {
     throw "This release script must run on Windows."
@@ -21,6 +22,20 @@ if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne
 if (-not $VcpkgRoot) {
     throw "VcpkgRoot or VCPKG_INSTALLATION_ROOT is required."
 }
+if (-not $DlcTemplatePath -or
+    -not (Test-Path $DlcTemplatePath -PathType Leaf)) {
+    throw "PS4FFPSC_DLC_TEMPLATE must identify the build-time DLC module template."
+}
+$DlcTemplatePath = (Resolve-Path $DlcTemplatePath).Path
+
+python -c "import platform, sys; raise SystemExit(0 if sys.version_info[:3] == (3, 13, 14) and platform.machine().lower() in ('amd64', 'x86_64') else 1)"
+if ($LASTEXITCODE -ne 0) {
+    throw "The release environment must use native Python 3.13.14 x64."
+}
+python -c "from importlib.metadata import version; expected = {'PySide6-Essentials': '6.9.3', 'shiboken6': '6.9.3', 'pyinstaller': '6.21.0'}; raise SystemExit(0 if all(version(name) == value for name, value in expected.items()) else 1)"
+if ($LASTEXITCODE -ne 0) {
+    throw "Pinned Python release dependencies are missing or have wrong versions."
+}
 
 $VcpkgToolchain = Join-Path $VcpkgRoot "scripts\buildsystems\vcpkg.cmake"
 if (-not (Test-Path $VcpkgToolchain -PathType Leaf)) {
@@ -30,11 +45,19 @@ if (-not (Test-Path $VcpkgToolchain -PathType Leaf)) {
 if (Test-Path $BuildRoot) {
     Remove-Item $BuildRoot -Recurse -Force
 }
-if (Test-Path $ReleaseRoot) {
-    Remove-Item $ReleaseRoot -Recurse -Force
-}
 New-Item $BuildRoot -ItemType Directory | Out-Null
-New-Item $ReleaseRoot -ItemType Directory | Out-Null
+New-Item $ReleaseRoot -ItemType Directory -Force | Out-Null
+$PlatformReleaseFiles = @(
+    "PS4-FFPFSC-v$Version-windows-x64.zip",
+    "PS4-FFPFSC-v$Version-windows-x64.zip.sha256",
+    "RELEASE_NOTES-v$Version-windows-x64.md"
+)
+foreach ($Name in $PlatformReleaseFiles) {
+    $ExistingReleaseFile = Join-Path $ReleaseRoot $Name
+    if (Test-Path $ExistingReleaseFile -PathType Leaf) {
+        Remove-Item $ExistingReleaseFile -Force
+    }
+}
 
 cmake -S $ProjectRoot -B (Join-Path $BuildRoot "helper") -G Ninja `
     -DCMAKE_BUILD_TYPE=Release `
@@ -48,6 +71,27 @@ if ($LASTEXITCODE -ne 0) { throw "C++ helper build failed." }
 
 ctest --test-dir (Join-Path $BuildRoot "helper") --output-on-failure
 if ($LASTEXITCODE -ne 0) { throw "C++ helper tests failed." }
+
+$env:DOTNET_CLI_HOME = Join-Path $BuildRoot "dotnet-home"
+$env:NUGET_PACKAGES = Join-Path $BuildRoot "nuget-packages"
+$DlcHelperOutput = Join-Path $BuildRoot "dlc-helper"
+$DlcManagedOutput = Join-Path $BuildRoot "dlc-helper-managed"
+$DlcIntermediate = Join-Path $BuildRoot "dlc-helper-intermediate"
+dotnet publish (Join-Path $ProjectRoot "third_party\ps4_dlc_patch\ps4-dlc-patch.csproj") `
+    --configuration Release `
+    --runtime win-x64 `
+    --self-contained true `
+    --output $DlcHelperOutput `
+    -p:PublishAot=true `
+    "-p:DlcPrxTemplatePath=$DlcTemplatePath" `
+    "-p:BaseOutputPath=$DlcManagedOutput\" `
+    "-p:BaseIntermediateOutputPath=$DlcIntermediate\" `
+    "-p:MSBuildProjectExtensionsPath=$DlcIntermediate\obj\"
+if ($LASTEXITCODE -ne 0) { throw "Experimental DLC helper build failed." }
+$DlcHelper = Join-Path $DlcHelperOutput "ps4-dlc-patch.exe"
+if (-not (Test-Path $DlcHelper -PathType Leaf)) {
+    throw "Experimental DLC helper executable was not created."
+}
 
 $env:QT_QPA_PLATFORM = "offscreen"
 $env:PYTHONUTF8 = "1"
@@ -64,6 +108,21 @@ if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed." }
 
 python (Join-Path $ProjectRoot "scripts\audit_windows_x64.py") $AppPath
 if ($LASTEXITCODE -ne 0) { throw "Windows x64 audit failed." }
+$BundledDlcHelper = Join-Path $AppPath "_internal\bin\ps4-dlc-patch.exe"
+& $BundledDlcHelper --help |
+    Set-Content (Join-Path $BuildRoot "dlc-helper-help.txt") -Encoding utf8NoBOM
+if ($LASTEXITCODE -ne 0) { throw "Bundled experimental DLC helper smoke test failed." }
+$DlcTemplateCheck = Join-Path $BuildRoot "dlc-helper-template.json"
+& $BundledDlcHelper --check-template |
+    Set-Content $DlcTemplateCheck -Encoding utf8NoBOM
+if ($LASTEXITCODE -ne 0) {
+    throw "Bundled experimental DLC template validation failed."
+}
+$DlcTemplateStatus = Get-Content $DlcTemplateCheck -Raw | ConvertFrom-Json
+if ($DlcTemplateStatus.status -ne "ok" -or
+    $DlcTemplateStatus.template_compatible -ne $true) {
+    throw "Bundled experimental DLC template returned an invalid status."
+}
 
 $TemporaryParent = if ($env:RUNNER_TEMP) {
     $env:RUNNER_TEMP

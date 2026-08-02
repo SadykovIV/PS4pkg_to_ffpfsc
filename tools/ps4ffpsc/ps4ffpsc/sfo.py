@@ -10,6 +10,43 @@ PSF_TEXT = 0x0204
 PSF_INTEGER = 0x0404
 PSF_BINARY = 0x0004
 
+# SCE system-language order used by localized TITLE_00…TITLE_29 fields.
+# JSON locale spellings follow the native FW 12.70 appmeta convention where it
+# differs from the shorter system-language name (notably Chinese scripts,
+# Latin American Spanish, and Arabic).
+SFO_TITLE_LOCALES = (
+    "ja-JP",
+    "en-US",
+    "fr-FR",
+    "es-ES",
+    "de-DE",
+    "it-IT",
+    "nl-NL",
+    "pt-PT",
+    "ru-RU",
+    "ko-KR",
+    "zh-Hant",
+    "zh-Hans",
+    "fi-FI",
+    "sv-SE",
+    "da-DK",
+    "no-NO",
+    "pl-PL",
+    "pt-BR",
+    "en-GB",
+    "tr-TR",
+    "es-419",
+    "ar-AE",
+    "fr-CA",
+    "cs-CZ",
+    "hu-HU",
+    "el-GR",
+    "ro-RO",
+    "th-TH",
+    "vi-VN",
+    "id-ID",
+)
+
 
 class SfoError(ValueError):
     pass
@@ -147,12 +184,38 @@ def build_param_json(
     localized = payload.get("localizedParameters")
     if not isinstance(localized, dict):
         localized = {}
+    if sfo_values is not None:
+        for index, locale in enumerate(SFO_TITLE_LOCALES):
+            value = sfo_values.get(f"TITLE_{index:02d}")
+            if not isinstance(value, str) or not value.strip():
+                continue
+            language = localized.get(locale)
+            if not isinstance(language, dict):
+                language = {}
+            language["titleName"] = value.strip()
+            localized[locale] = language
+
+    # ShadowMountPlus currently requires an en-US title fallback.  Prefer the
+    # exact TITLE_01 text when available, otherwise expose the selected title
+    # without discarding any other localized SFO entries.
     english = localized.get("en-US")
     if not isinstance(english, dict):
         english = {}
-    english["titleName"] = title_name
-    localized["defaultLanguage"] = "en-US"
+    english_title = (
+        sfo_values.get("TITLE_01") if sfo_values is not None else None
+    )
+    english["titleName"] = (
+        english_title.strip()
+        if isinstance(english_title, str) and english_title.strip()
+        else title_name
+    )
     localized["en-US"] = english
+    existing_default = localized.get("defaultLanguage")
+    if not (
+        isinstance(existing_default, str)
+        and isinstance(localized.get(existing_default), dict)
+    ):
+        localized["defaultLanguage"] = "en-US"
     payload["localizedParameters"] = localized
     payload["titleId"] = title_id
     payload["titleName"] = title_name

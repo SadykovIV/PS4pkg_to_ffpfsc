@@ -36,6 +36,7 @@ def main() -> int:
         root / "PS4 FFPFSC.exe",
         root / "ps4ffpsc-worker.exe",
         root / "_internal" / "bin" / "ps4_pkg_extract.exe",
+        root / "_internal" / "bin" / "ps4-dlc-patch.exe",
     ]
     missing = [str(path) for path in required if not path.is_file()]
     if missing:

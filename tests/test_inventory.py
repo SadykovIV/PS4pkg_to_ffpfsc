@@ -31,10 +31,116 @@ def _record(path: Path, sha: str, kind: str, title_id: str = "CUSA12345") -> dic
         "pkg_flags": ["CUMULATIVE_PATCH"] if kind == "patch" else [],
         "kind": kind,
         "entitlement_label": "ABCDEFGHIJKLMNOP",
+        "pkg_content_type": 0x1B if kind == "dlc" else 0,
+        "dlc_package_type": "PSAC" if kind == "dlc" else None,
         "size": 1024,
         "package_digest": sha,
         "localized_titles": {},
     }
+
+
+@pytest.mark.parametrize(
+    ("pkg_content_type", "dlc_package_type"),
+    [(0x1B, "PSAC"), (0x1C, "PSAL")],
+)
+def test_dlc_package_type_metadata_is_validated(
+    tmp_path: Path,
+    pkg_content_type: int,
+    dlc_package_type: str,
+) -> None:
+    record = {
+        **_record(tmp_path / "dlc.pkg", "a" * 64, "dlc"),
+        "pkg_content_type": pkg_content_type,
+        "dlc_package_type": dlc_package_type,
+    }
+
+    assert "invalid_dlc_package_type" not in inventory_module._validate_record(
+        record
+    )
+
+
+@pytest.mark.parametrize(
+    ("pkg_content_type", "dlc_package_type"),
+    [
+        (0x1B, "PSAL"),
+        (0x1C, "PSAC"),
+        (0x1D, None),
+        (None, "PSAC"),
+        (0x1B, ["PSAC"]),
+    ],
+)
+def test_invalid_or_mismatched_dlc_package_type_is_reported(
+    tmp_path: Path,
+    pkg_content_type: int | None,
+    dlc_package_type: object,
+) -> None:
+    record = {
+        **_record(tmp_path / "dlc.pkg", "a" * 64, "dlc"),
+        "pkg_content_type": pkg_content_type,
+        "dlc_package_type": dlc_package_type,
+    }
+
+    assert "invalid_dlc_package_type" in inventory_module._validate_record(record)
+
+
+def test_dump_dlc_without_pkg_header_metadata_remains_compatible(
+    tmp_path: Path,
+) -> None:
+    record = _record(tmp_path / "dump", "a" * 64, "dlc")
+    record.pop("pkg_content_type")
+    record.pop("dlc_package_type")
+
+    assert "invalid_dlc_package_type" not in inventory_module._validate_record(
+        record
+    )
+
+
+def test_fast_duplicate_key_distinguishes_psac_from_psal(tmp_path: Path) -> None:
+    psac = _record(tmp_path / "ac.pkg", "a" * 64, "dlc")
+    psal = {
+        **psac,
+        "path": str(tmp_path / "al.pkg"),
+        "pkg_content_type": 0x1C,
+        "dlc_package_type": "PSAL",
+    }
+
+    assert inventory_module._fast_duplicate_key(
+        psac
+    ) != inventory_module._fast_duplicate_key(psal)
+
+
+def test_wrong_region_dlc_warns_without_blocking_base_game(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    base = pkg / "base.pkg"
+    dlc = pkg / "wrong-region-dlc.pkg"
+    base.write_bytes(b"base")
+    dlc.write_bytes(b"dlc")
+    records = {
+        base: _record(base, "a" * 64, "base"),
+        dlc: {
+            **_record(dlc, "b" * 64, "dlc"),
+            "content_id": "UP9000-CUSA12345_00-ABCDEFGHIJKLMNOP",
+        },
+    }
+    monkeypatch.setattr(
+        inventory_module,
+        "inspect_package",
+        lambda _extractor, path, compute_sha256=False: dict(records[path]),
+    )
+
+    result = scan_packages(tmp_path, pkg, tmp_path / "unpacked", tmp_path / "helper")
+
+    game = result["games"]["CUSA12345"]
+    assert game["buildable"]
+    assert game["conflicts"] == []
+    assert game["warnings"] == ["incompatible_dlc_package"]
+    assert game["dlc"][0]["validation_errors"] == [
+        "region_or_content_mismatch"
+    ]
 
 
 def test_find_extractor_accepts_bundled_windows_executable(tmp_path: Path) -> None:
@@ -44,6 +150,39 @@ def test_find_extractor_accepts_bundled_windows_executable(tmp_path: Path) -> No
     extractor.write_bytes(b"MZ")
 
     assert find_extractor(tmp_path, resources) == extractor
+
+
+def test_unicode_pkg_path_and_title_are_preserved_while_windows_unsafe_title_chars_are_sanitized(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    pkg = tmp_path / "Игры ™"
+    pkg.mkdir()
+    source = pkg / "Sekiro™ Shadows Die Twice.pkg"
+    source.write_bytes(b"pkg")
+    record = {
+        **_record(source, "a" * 64, "base", "CUSA13801"),
+        "title": "Sekiro™: Shadows Die Twice",
+    }
+    monkeypatch.setattr(
+        inventory_module,
+        "inspect_package",
+        lambda _extractor, path, compute_sha256=False: dict(record),
+    )
+
+    result = scan_packages(
+        tmp_path,
+        pkg,
+        tmp_path / "unpacked",
+        tmp_path / "helper",
+    )
+
+    game = result["games"]["CUSA13801"]
+    assert game["base"][0]["path"] == str(source.resolve())
+    assert game["directory_name"] == (
+        "CUSA13801 - Sekiro™_ Shadows Die Twice"
+    )
+    assert game["buildable"] is True
 
 
 def test_fast_metadata_duplicate_is_unchecked_candidate_without_full_hashing(

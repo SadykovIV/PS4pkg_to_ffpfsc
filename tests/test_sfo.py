@@ -5,6 +5,7 @@ import json
 import pytest
 
 from ps4ffpsc.sfo import (
+    SFO_TITLE_LOCALES,
     SfoError,
     build_param_json,
     choose_title,
@@ -12,6 +13,41 @@ from ps4ffpsc.sfo import (
     parse_sfo_bytes,
     validate_shadowmount_param_json,
 )
+
+
+def test_sfo_title_locale_order_matches_fw1270_appmeta_conventions() -> None:
+    assert SFO_TITLE_LOCALES == (
+        "ja-JP",
+        "en-US",
+        "fr-FR",
+        "es-ES",
+        "de-DE",
+        "it-IT",
+        "nl-NL",
+        "pt-PT",
+        "ru-RU",
+        "ko-KR",
+        "zh-Hant",
+        "zh-Hans",
+        "fi-FI",
+        "sv-SE",
+        "da-DK",
+        "no-NO",
+        "pl-PL",
+        "pt-BR",
+        "en-GB",
+        "tr-TR",
+        "es-419",
+        "ar-AE",
+        "fr-CA",
+        "cs-CZ",
+        "hu-HU",
+        "el-GR",
+        "ro-RO",
+        "th-TH",
+        "vi-VN",
+        "id-ID",
+    )
 
 
 def test_sfo_round_trip_and_localized_title() -> None:
@@ -79,6 +115,27 @@ def test_param_json_uses_the_minimal_native_ps4_projection() -> None:
     }
 
 
+def test_param_json_uses_exact_english_title_and_repairs_invalid_default() -> None:
+    original = json.dumps(
+        {
+            "localizedParameters": {
+                "defaultLanguage": "missing-locale",
+            }
+        }
+    ).encode()
+
+    generated = build_param_json(
+        "CUSA12345",
+        "Display title",
+        original,
+        {"TITLE_01": "Exact US English title"},
+    )
+
+    localized = json.loads(generated)["localizedParameters"]
+    assert localized["defaultLanguage"] == "en-US"
+    assert localized["en-US"]["titleName"] == "Exact US English title"
+
+
 def test_nonzero_sfo_user_parameters_are_mirrored_for_image_compatibility() -> None:
     generated = build_param_json(
         "CUSA13801",
@@ -94,6 +151,51 @@ def test_nonzero_sfo_user_parameters_are_mirrored_for_image_compatibility() -> N
     assert payload["userDefinedParam1"] == 2
     assert payload["userDefinedParam3"] == 545259552
     assert "userDefinedParam2" not in payload
+
+
+def test_sfo_localized_titles_are_projected_without_losing_existing_metadata() -> None:
+    original = json.dumps(
+        {
+            "localizedParameters": {
+                "defaultLanguage": "de-DE",
+                "de-DE": {"titleName": "old", "subTitle": "preserved"},
+            }
+        }
+    ).encode()
+    generated = build_param_json(
+        "CUSA02172",
+        "Journey™ Collector’s Edition",
+        original,
+        {
+            "TITLE_01": "Journey™ Collector’s Edition",
+            "TITLE_04": "Journey – Sammleredition",
+            "TITLE_08": "Коллекционное издание «Путешествие»",
+            "TITLE_10": "風之旅人™典藏版",
+            "TITLE_11": "风之旅人™典藏版",
+            "TITLE_20": "Journey: Edición para Latinoamérica",
+            "TITLE_21": "جورني™ إصدار هواة الجمع",
+        },
+    )
+
+    payload = json.loads(generated)
+    localized = payload["localizedParameters"]
+    assert localized["defaultLanguage"] == "de-DE"
+    assert localized["en-US"]["titleName"] == "Journey™ Collector’s Edition"
+    assert localized["de-DE"] == {
+        "subTitle": "preserved",
+        "titleName": "Journey – Sammleredition",
+    }
+    assert localized["ru-RU"]["titleName"] == (
+        "Коллекционное издание «Путешествие»"
+    )
+    assert localized["zh-Hant"]["titleName"] == "風之旅人™典藏版"
+    assert localized["zh-Hans"]["titleName"] == "风之旅人™典藏版"
+    assert localized["es-419"]["titleName"] == (
+        "Journey: Edición para Latinoamérica"
+    )
+    assert localized["ar-AE"]["titleName"] == (
+        "جورني™ إصدار هواة الجمع"
+    )
 
 
 def test_param_json_title_mismatch_rejected() -> None:

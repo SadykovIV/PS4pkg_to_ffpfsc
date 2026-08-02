@@ -1,5 +1,8 @@
 # Desktop GUI
 
+**Languages:** **English** · [Русский](ru/GUI.md) ·
+[Index](README.md)
+
 `PS4 FFPFSC` is a self-contained macOS arm64 and Windows x64 application
 implemented with PySide6 Essentials. It embeds Python, Qt, MkPFS and the native
 PKG helper, but calls the same `ps4ffpsc` worker used by automated tests, so the
@@ -60,6 +63,13 @@ immediately. It does not perform a full source-file hash pass.
    of the logical CPUs, with a minimum of one, so conversion does not occupy
    every available thread. Both selections are persisted. Compression controls
    do not apply to raw exFAT.
+8. Experimental single-image DLC is disabled by default. Enable it only for a
+   deliberate compatibility test. `PSAC` carries game data; `PSAL` is
+   license-only. The mode may modify staged copies of game executables and
+   place selected DLC support data in the main game image; it never writes to
+   source PKGs or the selected unpacked tree. A completed and verified image
+   is not proof that DLC will be registered, detected, or usable on a PS5.
+   `runtime_verified=false` remains until a hardware test.
 
 When packages were found but no game is buildable, the primary action remains
 enabled as **Check readiness** / **Проверить готовность**. It lists the actual
@@ -117,23 +127,38 @@ the PKG. The helper now reads and decrypts all 544 bytes, then writes exactly
 532 bytes. This preserves the internal 20-byte SHA-1 footer instead of
 corrupting its final bytes.
 
+Separately, for a **selected unpacked game**, version 0.2.8 automatically
+inspects `sce_sys/npbind.dat` after copying or linking it into the temporary
+`merged` tree. If its magic, version, declared size, and entry layout are valid
+but only the SHA-1 footer differs, the application atomically replaces the
+final 20 bytes in the temporary copy. It performs no write when the footer is
+already valid, and fails the build instead of hiding a structural error. The
+selected source tree remains unchanged in every case.
+
 ## Launch and packaging
 
 Download and completely extract
-`PS4-FFPFSC-v0.2.7-windows-x64.zip`, then launch `PS4 FFPFSC.exe`. The
+`PS4-FFPFSC-v0.2.8-windows-x64.zip`, then launch `PS4 FFPFSC.exe`. The
 accompanying `_internal` directory and `ps4ffpsc-worker.exe` are required parts
 of the self-contained application.
 
-To build the Windows archive on a native Windows x64 host with Python and
-vcpkg already available:
+To build the Windows archive on a native Windows x64 host, install Python
+3.13.14, .NET SDK 8, CMake/Ninja, and the required static vcpkg packages. Build
+the DLC module template first on macOS or Linux with OpenOrbis PS4 Toolchain
+v0.5.4, then provide its absolute path:
 
 ```powershell
+$env:PS4FFPSC_DLC_TEMPLATE = "C:\path\to\dlcldr.prx"
 .\scripts\build_release_windows_x64.ps1
 ```
 
 The GitHub Actions workflow `.github/workflows/build-windows-x64.yml` provisions
-the remaining build dependencies, runs the test suite, builds the application,
-audits all bundled PE files as x64, and uploads the ZIP/checksum/notes artifact.
+the Linux-built template and remaining Windows build dependencies, runs the
+test suite, builds the application, audits all bundled PE files as x64, and
+uploads the ZIP/checksum/notes artifact.
+
+The NativeAOT helper targets .NET 8 and pins
+`Microsoft.NETCore.App.Runtime` 8.0.26.
 
 For macOS arm64:
 
@@ -143,10 +168,19 @@ For macOS arm64:
 open "build-release/dist/PS4 FFPFSC.app"
 ```
 
-The script builds the helper with static Crypto++ linkage, freezes the Python
-and Qt runtime, signs the application, audits every Mach-O architecture and
-dependency, runs frozen doctor/MkPFS/GUI smoke tests, then creates a ZIP and
-SHA-256 sidecar under `release/`.
+The bootstrap downloads the official Python 3.13.14 macOS package and verifies
+its pinned SHA-256 before extracting the framework into an isolated build
+cache; it does not modify `/Library`. It installs PySide6 Essentials and
+shiboken6 6.9.3 into the project virtual environment. Crypto++ 8.9.0 is downloaded as a pinned upstream source
+archive and compiled locally for arm64 with a macOS 13.0 deployment target;
+the Homebrew Crypto++ bottle is deliberately not used.
+
+The release script builds the C++ helper with that static Crypto++ library,
+freezes the Python and Qt runtime, signs the application, and audits every
+Mach-O architecture, dependency, and deployment target. Any component that
+requires a macOS version above 13.0 fails the release gate. Frozen
+doctor/MkPFS/GUI smoke tests then run before the ZIP and SHA-256 sidecar are
+created under `release/`.
 
 The release script uses ad-hoc signing unless
 `PS4FFPSC_CODESIGN_IDENTITY` contains an installed Developer ID identity.

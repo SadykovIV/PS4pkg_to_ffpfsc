@@ -19,3 +19,5 @@ shadPS4-v.0.7.0/
 release/
 build-release/
 build-release-windows/
+third_party/ps4_dlc_patch/bin/
+third_party/ps4_dlc_patch/obj/

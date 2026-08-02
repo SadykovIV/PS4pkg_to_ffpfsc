@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import struct
 from pathlib import Path
 
 import pytest
@@ -13,6 +15,24 @@ from ps4ffpsc.pipeline import (
 )
 from ps4ffpsc.sfo import make_sfo, parse_sfo, validate_shadowmount_param_json
 from ps4ffpsc.util import atomic_write_json
+
+
+def _npbind_with_damaged_footer() -> bytes:
+    size = 0x80 + 0x180 + 20
+    data = bytearray(size)
+    struct.pack_into(
+        ">IIQQQ",
+        data,
+        0,
+        0xD294A018,
+        1,
+        size,
+        0x180,
+        1,
+    )
+    data[-20:] = hashlib.sha1(data[:-20]).digest()
+    data[-4:] = bytes.fromhex("87f1c2cf")
+    return bytes(data)
 
 
 def _settings(root: Path) -> Settings:
@@ -85,6 +105,8 @@ def test_synthetic_base_patch_overlay_and_param_json(tmp_path: Path) -> None:
             "TITLE": "Игра",
             "APP_VER": "01.10",
             "CATEGORY": "gp",
+            "TITLE_04": "Spiel",
+            "TITLE_08": "Игра",
             "USER_DEFINED_PARAM_1": 2,
             "USER_DEFINED_PARAM_2": 0,
         }
@@ -105,6 +127,8 @@ def test_synthetic_base_patch_overlay_and_param_json(tmp_path: Path) -> None:
     ]
     assert merged_param_json["userDefinedParam1"] == 2
     assert "userDefinedParam2" not in merged_param_json
+    assert merged_param_json["localizedParameters"]["de-DE"]["titleName"] == "Spiel"
+    assert merged_param_json["localizedParameters"]["ru-RU"]["titleName"] == "Игра"
     assert (base_dir / "sce_sys" / "param.json").read_bytes() == original_param_json
     replacement = next(item for item in report["overlay_changes"] if item["path"] == "data.bin")
     assert replacement["previous_size"] == 3
@@ -113,7 +137,60 @@ def test_synthetic_base_patch_overlay_and_param_json(tmp_path: Path) -> None:
     assert not report["generated_param_json"]
     assert report["normalized_existing_param_json"]
     assert report["mirrored_user_defined_params"] == {"userDefinedParam1": 2}
+    assert report["mirrored_localized_titles"] == {
+        "TITLE_04": "Spiel",
+        "TITLE_08": "Игра",
+    }
     assert not report["ps5_runtime_verified"]
+
+
+def test_patched_smp_report_does_not_claim_param_json_projection(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    settings.compat = "patched-smp"
+    base = _pkg("base", "1" * 64, "01.00")
+    game = {
+        "title_id": "CUSA12345",
+        "title": "Localized Game",
+        "directory_name": "CUSA12345 - Localized Game",
+        "base": [base],
+        "patches": [],
+        "dlc": [],
+        "unknown": [],
+        "conflicts": [],
+        "warnings": [],
+        "buildable": True,
+    }
+    inventory = {"games": {"CUSA12345": game}}
+    root = settings.unpacked_dir / game["directory_name"]
+    atomic_write_json(
+        root / "manifest.json",
+        {"synthetic": True, "extractor_revision": EXTRACTOR_REVISION},
+    )
+    base_dir = package_destination(root, base)
+    (base_dir / "sce_sys").mkdir(parents=True)
+    (base_dir / "eboot.bin").write_bytes(b"base executable")
+    (base_dir / "sce_sys" / "param.sfo").write_bytes(
+        make_sfo(
+            {
+                "TITLE_ID": "CUSA12345",
+                "TITLE": "Localized Game",
+                "TITLE_08": "Локализованная игра",
+                "APP_VER": "01.00",
+                "CATEGORY": "gd",
+                "USER_DEFINED_PARAM_1": 2,
+            }
+        )
+    )
+
+    report = merge_game(settings, inventory, "CUSA12345")
+
+    assert not (root / "merged" / "app" / "sce_sys" / "param.json").exists()
+    assert not report["generated_param_json"]
+    assert not report["normalized_existing_param_json"]
+    assert report["mirrored_localized_titles"] == {}
+    assert report["mirrored_user_defined_params"] == {}
 
 
 def test_patch_can_replace_path_with_case_only_name_change(tmp_path: Path) -> None:
@@ -312,3 +389,63 @@ def test_merge_discards_workspace_from_older_extractor_revision(
     assert (root / "merged" / "app" / "eboot.bin").read_bytes() == (
         b"new extraction"
     )
+
+
+def test_dump_merge_repairs_only_npbind_footer_in_temporary_copy(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    source = tmp_path / "selected-dump"
+    (source / "sce_sys").mkdir(parents=True)
+    (source / "eboot.bin").write_bytes(b"dump executable")
+    (source / "sce_sys" / "param.sfo").write_bytes(
+        make_sfo(
+            {
+                "TITLE_ID": "CUSA00592",
+                "TITLE": "Metro Last Light Redux",
+                "APP_VER": "01.03",
+                "CATEGORY": "gp",
+            }
+        )
+    )
+    damaged = _npbind_with_damaged_footer()
+    source_npbind = source / "sce_sys" / "npbind.dat"
+    source_npbind.write_bytes(damaged)
+    base = {
+        "kind": "base",
+        "source_kind": "dump_tree",
+        "source_id": "stat-dump",
+        "tree_signature": "stat-dump",
+        "app_version": "01.03",
+        "path": str(source),
+        "pkg_flags": [],
+    }
+    game = {
+        "title_id": "CUSA00592",
+        "title": "Metro Last Light Redux",
+        "directory_name": "CUSA00592 - Metro Last Light Redux",
+        "base": [base],
+        "patches": [],
+        "dlc": [],
+        "unknown": [],
+        "conflicts": [],
+        "warnings": [],
+        "buildable": True,
+    }
+    inventory = {"games": {"CUSA00592": game}}
+    root = settings.unpacked_dir / game["directory_name"]
+    atomic_write_json(
+        root / "manifest.json",
+        {"extractor_revision": EXTRACTOR_REVISION},
+    )
+
+    report = merge_game(settings, inventory, "CUSA00592")
+
+    merged = root / "merged" / "app" / "sce_sys" / "npbind.dat"
+    assert source_npbind.read_bytes() == damaged
+    assert merged.read_bytes()[:-20] == damaged[:-20]
+    assert merged.read_bytes()[-20:] == hashlib.sha1(
+        merged.read_bytes()[:-20]
+    ).digest()
+    assert report["npbind_footer_repair"]["repaired"] is True
+    assert report["unpacked_source_preserved"] is True

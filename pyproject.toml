@@ -1,10 +1,14 @@
 [project]
 name = "ps4ffpsc"
-version = "0.2.7"
-requires-python = ">=3.11"
+version = "0.2.8"
+requires-python = ">=3.11,<3.14"
 description = "Safe PS4 PKG to ShadowMountPlus FFPFSC pipeline"
 license = "GPL-3.0-or-later"
-dependencies = ["PySide6-Essentials==6.11.1"]
+dependencies = [
+  "cryptography==49.0.0",
+  "PySide6-Essentials==6.9.3",
+  "shiboken6==6.9.3",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

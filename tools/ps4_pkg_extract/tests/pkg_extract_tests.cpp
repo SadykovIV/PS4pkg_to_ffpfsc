@@ -17,12 +17,19 @@
 
 #include "core/crypto/crypto.h"
 #include "core/file_format/pkg.h"
+#include "dlc_metadata.h"
 
 namespace fs = std::filesystem;
 
 static constexpr u32 NpbindDeclaredSize = 532;
 static constexpr u64 NpbindStoredSize = PkgEntryStoredSize(0x403, NpbindDeclaredSize);
 static_assert(NpbindStoredSize == 544);
+static_assert(PS4FFPSC::DlcPackageTypeFor(0x1B) == "PSAC");
+static_assert(PS4FFPSC::DlcPackageTypeFor(0x1C) == "PSAL");
+static_assert(!PS4FFPSC::DlcPackageTypeFor(0x1A));
+static_assert(PS4FFPSC::DlcPackageTypeMatches(0x1B, "PSAC"));
+static_assert(PS4FFPSC::DlcPackageTypeMatches(0x1C, "PSAL"));
+static_assert(!PS4FFPSC::DlcPackageTypeMatches(0x1B, "PSAL"));
 
 class TemporaryDirectory {
 public:
@@ -161,8 +168,22 @@ static void VerifyMissingAlignedCiphertextIsRejected(const fs::path& root) {
     }
 }
 
+static void VerifyDlcPackageTypeMapping() {
+    const auto ac = PS4FFPSC::DlcPackageTypeFor(0x1B);
+    const auto al = PS4FFPSC::DlcPackageTypeFor(0x1C);
+    if (!ac || *ac != "PSAC" || !al || *al != "PSAL") {
+        throw std::runtime_error("DLC PKG content type mapping changed");
+    }
+    if (PS4FFPSC::DlcPackageTypeFor(0) ||
+        PS4FFPSC::DlcPackageTypeFor(0x1D) ||
+        PS4FFPSC::DlcPackageTypeMatches(0x1B, "PSAL")) {
+        throw std::runtime_error("invalid DLC PKG content type was accepted");
+    }
+}
+
 int main() {
     TemporaryDirectory temporary;
+    VerifyDlcPackageTypeMapping();
     VerifyAlignedCiphertextIsReadAndTrimmed(temporary.path);
     VerifyMissingAlignedCiphertextIsRejected(temporary.path);
     return 0;

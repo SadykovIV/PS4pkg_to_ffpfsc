@@ -24,6 +24,7 @@ LOG = logging.getLogger("ps4ffpsc")
 PATCH_ROLE_ORDINARY = "ordinary"
 PATCH_ROLE_ADDITIONAL_LAYER = "additional_layer"
 _PATCH_ROLE_VALUES = {PATCH_ROLE_ORDINARY, PATCH_ROLE_ADDITIONAL_LAYER}
+DLC_PACKAGE_TYPES = {"PSAC": 0x1B, "PSAL": 0x1C}
 _ADDITIONAL_LAYER_FILENAME_MARKER = re.compile(
     r"""
     (
@@ -184,6 +185,19 @@ def _validate_record(record: dict[str, Any]) -> list[str]:
         errors.append("content_id_title_mismatch")
     if record.get("kind") == "dlc" and not record.get("entitlement_label"):
         errors.append("invalid_entitlement_label")
+    if record.get("kind") == "dlc" and (
+        "pkg_content_type" in record or "dlc_package_type" in record
+    ):
+        dlc_package_type = record.get("dlc_package_type")
+        expected_content_type = (
+            DLC_PACKAGE_TYPES.get(dlc_package_type)
+            if isinstance(dlc_package_type, str)
+            else None
+        )
+        if expected_content_type is None or record.get(
+            "pkg_content_type"
+        ) != expected_content_type:
+            errors.append("invalid_dlc_package_type")
     return errors
 
 
@@ -204,6 +218,8 @@ def _fast_duplicate_key(record: dict[str, Any]) -> tuple[Any, ...] | None:
         record.get("version"),
         record.get("system_version"),
         record.get("entitlement_label"),
+        record.get("pkg_content_type"),
+        record.get("dlc_package_type"),
         int(record.get("size", 0) or 0),
         tuple(sorted(str(flag) for flag in record.get("pkg_flags", []))),
     )
@@ -279,24 +295,33 @@ def _group_games(
             else ""
         )
         base_region = content_id_parts(base_content)
-        for item in [
-            *(
-                package
-                for package in game["patches"]
-                if not package.get("duplicate_of")
-            ),
-            *(
-                package
-                for package in game["dlc"]
-                if not package.get("duplicate_of")
-            ),
-        ]:
+        for item in (
+            package
+            for package in game["patches"]
+            if not package.get("duplicate_of")
+        ):
             parts = content_id_parts(item.get("content_id", ""))
             if base_region and parts and parts[:2] != base_region[:2]:
                 item.setdefault("validation_errors", []).append(
                     "region_or_content_mismatch"
                 )
                 game["conflicts"].append("incompatible_package")
+
+        # DLC is optional and disabled by default.  An incompatible DLC source
+        # must therefore remain visible and unselected without making an
+        # otherwise valid base/patch set unbuildable.  Experimental embedding
+        # performs a strict selected-DLC validation before extraction.
+        for item in (
+            package
+            for package in game["dlc"]
+            if not package.get("duplicate_of")
+        ):
+            parts = content_id_parts(item.get("content_id", ""))
+            if base_region and parts and parts[:2] != base_region[:2]:
+                errors = item.setdefault("validation_errors", [])
+                if "region_or_content_mismatch" not in errors:
+                    errors.append("region_or_content_mismatch")
+                game["warnings"].append("incompatible_dlc_package")
 
         patches_by_version: dict[str, list[dict[str, Any]]] = {}
         invalid_patch_versions = False

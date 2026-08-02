@@ -73,7 +73,7 @@ from .util import path_is_within, paths_overlap
 
 
 APP_NAME = "PS4 FFPFSC"
-APP_VERSION = "0.2.7"
+APP_VERSION = "0.2.8"
 BUILD_STAGE_START = {1: 2.0, 2: 30.0, 3: 55.0, 4: 88.0, 5: 96.0}
 BUILD_STAGE_KEYS = {
     1: "stage_sources",
@@ -117,6 +117,12 @@ TEXTS = {
         "output_format": "Формат образа:",
         "format_ffpfsc": "FFPFSC — сжатый (по умолчанию)",
         "format_exfat": "exFAT — без сжатия",
+        "dlc_mode": "Режим DLC:",
+        "dlc_mode_off": "Не добавлять DLC (по умолчанию)",
+        "dlc_mode_single_experimental": "Встроить DLC в один образ — экспериментально",
+        "dlc_experimental_note": "Встраивание DLC в один образ — экспериментальная функция",
+        "dlc_warning_title": "Экспериментальный режим DLC",
+        "dlc_warning_body": "DLC будут встроены в тот же образ, что и игра. Эта функция экспериментальна: совместимость и работа DLC на консоли пока не гарантируются. Продолжить сборку?",
         "compression": "Степень сжатия:",
         "compression_workers": "Потоки сжатия:",
         "compression_level_none": "0 — без deflate-сжатия",
@@ -253,6 +259,12 @@ TEXTS = {
         "output_format": "Image format:",
         "format_ffpfsc": "FFPFSC — compressed (default)",
         "format_exfat": "exFAT — uncompressed",
+        "dlc_mode": "DLC mode:",
+        "dlc_mode_off": "Do not include DLC (default)",
+        "dlc_mode_single_experimental": "Embed DLC into one image — experimental",
+        "dlc_experimental_note": "Embedding DLC into one image is experimental",
+        "dlc_warning_title": "Experimental DLC mode",
+        "dlc_warning_body": "DLC will be embedded into the same image as the game. This feature is experimental: console compatibility and DLC operation are not yet guaranteed. Continue building?",
         "compression": "Compression level:",
         "compression_workers": "Compression workers:",
         "compression_level_none": "0 — no deflate compression",
@@ -483,6 +495,23 @@ class MainWindow(QMainWindow):
         value = self.output_format_combo.currentData()
         return str(value) if value in {"ffpfsc", "exfat"} else "ffpfsc"
 
+    def _current_dlc_mode(self) -> str:
+        value = self.dlc_combo.currentData()
+        return (
+            str(value)
+            if value in {"off", "single-experimental"}
+            else "off"
+        )
+
+    def _update_dlc_text(self) -> None:
+        for index in range(self.dlc_combo.count()):
+            mode = str(self.dlc_combo.itemData(index))
+            self.dlc_combo.setItemText(
+                index,
+                self._t(f"dlc_mode_{mode.replace('-', '_')}"),
+            )
+        self.dlc_experimental_label.setText(self._t("dlc_experimental_note"))
+
     def _update_compression_text(self) -> None:
         for index in range(self.output_format_combo.count()):
             output_format = str(self.output_format_combo.itemData(index))
@@ -526,6 +555,7 @@ class MainWindow(QMainWindow):
             ]
         )
         self._update_compression_text()
+        self._update_dlc_text()
         self._update_source_label()
         self._update_storage_labels()
         if self.inventory is not None:
@@ -720,9 +750,9 @@ class MainWindow(QMainWindow):
         self.resume_check.setChecked(True)
         self.force_check = self._bind_text(QCheckBox(), "force")
         self.keep_inner_check = self._bind_text(QCheckBox(), "keep_inner")
-        options.addWidget(self.resume_check, 2, 0)
-        options.addWidget(self.force_check, 2, 1)
-        options.addWidget(self.keep_inner_check, 2, 2)
+        options.addWidget(self.resume_check, 3, 0)
+        options.addWidget(self.force_check, 3, 1)
+        options.addWidget(self.keep_inner_check, 3, 2)
         output_format_label = self._bind_text(QLabel(), "output_format")
         options.addWidget(output_format_label, 0, 0)
         self.output_format_combo = QComboBox()
@@ -765,6 +795,23 @@ class MainWindow(QMainWindow):
         self.compression_threads_label = QLabel()
         self.compression_threads_label.setObjectName("summary")
         options.addWidget(self.compression_threads_label, 1, 2, 1, 2)
+        dlc_mode_label = self._bind_text(QLabel(), "dlc_mode")
+        options.addWidget(dlc_mode_label, 2, 0)
+        self.dlc_combo = QComboBox()
+        self.dlc_combo.addItem(self._t("dlc_mode_off"), "off")
+        self.dlc_combo.addItem(
+            self._t("dlc_mode_single_experimental"),
+            "single-experimental",
+        )
+        self.dlc_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToContents
+        )
+        self.dlc_combo.currentIndexChanged.connect(self._dlc_mode_changed)
+        options.addWidget(self.dlc_combo, 2, 1)
+        self.dlc_experimental_label = QLabel(self._t("dlc_experimental_note"))
+        self.dlc_experimental_label.setObjectName("experimentalNote")
+        self.dlc_experimental_label.setWordWrap(True)
+        options.addWidget(self.dlc_experimental_label, 2, 2, 1, 2)
         self._update_compression_text()
         options.setColumnStretch(4, 1)
         page.addLayout(options)
@@ -808,6 +855,7 @@ class MainWindow(QMainWindow):
             QLabel { background: transparent; }
             QLabel#pageTitle { font-size: 24px; font-weight: 700; }
             QLabel#subtitle, QLabel#summary { color: #9ba9bc; }
+            QLabel#experimentalNote { color: #f0b35b; font-size: 11px; }
             QLabel#sectionTitle { font-size: 14px; font-weight: 700; }
             QLabel#brandMark {
                 background: #536dfe; border-radius: 13px; color: white;
@@ -901,6 +949,17 @@ class MainWindow(QMainWindow):
             if output_format_index >= 0
             else self.output_format_combo.findData("ffpfsc")
         )
+        stored_dlc_mode = self.settings.value(
+            "dlc_mode",
+            "off",
+            type=str,
+        )
+        dlc_mode_index = self.dlc_combo.findData(stored_dlc_mode)
+        self.dlc_combo.setCurrentIndex(
+            dlc_mode_index
+            if dlc_mode_index >= 0
+            else self.dlc_combo.findData("off")
+        )
         stored_compression_level = self.settings.value(
             "compression_level",
             7,
@@ -949,6 +1008,7 @@ class MainWindow(QMainWindow):
             "output_format",
             self._current_output_format(),
         )
+        self.settings.setValue("dlc_mode", self._current_dlc_mode())
         self.settings.setValue("window_geometry", self.saveGeometry())
 
     def _compression_level_changed(self, _index: int) -> None:
@@ -968,6 +1028,9 @@ class MainWindow(QMainWindow):
         )
         self._update_compression_text()
         self._update_controls()
+
+    def _dlc_mode_changed(self, _index: int) -> None:
+        self.settings.setValue("dlc_mode", self._current_dlc_mode())
 
     def _choose_files(self) -> None:
         start = str(self.source_folder or self.root / "pkg")
@@ -1133,8 +1196,8 @@ class MainWindow(QMainWindow):
             str(self.output_dir.resolve()),
             "--compat",
             "current-smp",
-            "--include-dlc",
-            "auto",
+            "--dlc-mode",
+            self._current_dlc_mode(),
             "--output-format",
             self._current_output_format(),
             "--console-log",
@@ -1485,6 +1548,19 @@ class MainWindow(QMainWindow):
             )
             self._show_error(self._t("build_unavailable"), detail)
             return
+        if self._current_dlc_mode() == "single-experimental":
+            answer = QMessageBox.warning(
+                self,
+                self._t("dlc_warning_title"),
+                self._t("dlc_warning_body"),
+                (
+                    QMessageBox.StandardButton.Yes
+                    | QMessageBox.StandardButton.Cancel
+                ),
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
         try:
             if self.source_mode == "dump" and self.source_folder is not None:
                 source = self.source_folder.expanduser().resolve(strict=False)
@@ -2105,6 +2181,7 @@ class MainWindow(QMainWindow):
         self.games_tree.setEnabled(not running)
         uses_compression = self._current_output_format() == "ffpfsc"
         self.output_format_combo.setEnabled(not running)
+        self.dlc_combo.setEnabled(not running)
         self.compression_combo.setEnabled(not running and uses_compression)
         self.compression_workers_spin.setEnabled(
             not running and uses_compression

@@ -5,6 +5,7 @@ from PyInstaller.utils.hooks import collect_submodules
 
 ROOT = Path(SPECPATH).parents[1]
 HELPER = ROOT / "build-release" / "helper" / "tools" / "ps4_pkg_extract" / "ps4_pkg_extract"
+DLC_HELPER = ROOT / "build-release" / "dlc-helper" / "ps4-dlc-patch"
 ICON = ROOT / "build-release" / "AppIcon.icns"
 
 hidden = collect_submodules("mkpfs") + [
@@ -18,7 +19,7 @@ a = Analysis(
         str(ROOT / "tools" / "ps4ffpsc"),
         str(ROOT / "third_party" / "mkpfs"),
     ],
-    binaries=[(str(HELPER), "bin")],
+    binaries=[(str(HELPER), "bin"), (str(DLC_HELPER), "bin")],
     datas=[
         (str(ROOT / "ps4ffpsc.toml"), "."),
         (str(ROOT / "LICENSE"), "."),
@@ -75,8 +76,8 @@ app = BUNDLE(
     info_plist={
         "CFBundleDisplayName": "PS4 FFPFSC",
         "CFBundleName": "PS4 FFPFSC",
-        "CFBundleShortVersionString": "0.2.7",
-        "CFBundleVersion": "8",
+        "CFBundleShortVersionString": "0.2.8",
+        "CFBundleVersion": "9",
         "LSMinimumSystemVersion": "13.0",
         "NSHighResolutionCapable": True,
         "NSRequiresAquaSystemAppearance": False,

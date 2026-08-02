@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from ps4ffpsc.npbind import validate_npbind
+from ps4ffpsc.npbind import inspect_npbind, repair_npbind_footer, validate_npbind
 
 
 def _make_npbind(entry_count: int = 1) -> bytes:
@@ -53,3 +53,39 @@ def test_npbind_validator_rejects_metro_style_four_byte_footer_corruption(
 
     with pytest.raises(ValueError, match="SHA-1 footer mismatch"):
         validate_npbind(path)
+
+    inspection = inspect_npbind(path)
+    assert inspection["status"] == "repairable_footer"
+    assert inspection["footer_valid"] is False
+
+
+def test_npbind_footer_repair_is_atomic_and_changes_only_digest(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "npbind.dat"
+    original = bytearray(_make_npbind())
+    original[-4:] = bytes.fromhex("87f1c2cf")
+    path.write_bytes(original)
+
+    report = repair_npbind_footer(path)
+    repaired = path.read_bytes()
+
+    assert report["repaired"] is True
+    assert report["previous_sha1"] == bytes(original[-20:]).hex()
+    assert repaired[:-20] == bytes(original[:-20])
+    assert repaired[-20:] == hashlib.sha1(repaired[:-20]).digest()
+    assert validate_npbind(path)["footer_valid"] is True
+    assert not list(tmp_path.glob("*.partial"))
+
+
+def test_npbind_footer_repair_rejects_invalid_layout_without_writing(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "npbind.dat"
+    path.write_bytes(b"invalid")
+    before = path.read_bytes()
+
+    with pytest.raises(ValueError, match="too small"):
+        repair_npbind_footer(path)
+
+    assert path.read_bytes() == before

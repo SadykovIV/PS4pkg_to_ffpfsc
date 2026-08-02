@@ -33,6 +33,7 @@ add_executable(ps4_pkg_extract
 target_compile_features(ps4_pkg_extract PRIVATE cxx_std_23)
 target_compile_definitions(ps4_pkg_extract PRIVATE PS4FFPSC_STANDALONE=1)
 target_include_directories(ps4_pkg_extract PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/src"
   "${CMAKE_CURRENT_SOURCE_DIR}/compat"
   "${SHADPS4_PKG_ROOT}"
   "${CRYPTOPP_INCLUDE_DIR}")
@@ -87,6 +88,7 @@ add_executable(ps4_pkg_extract_pkg_tests
 target_compile_features(ps4_pkg_extract_pkg_tests PRIVATE cxx_std_23)
 target_compile_definitions(ps4_pkg_extract_pkg_tests PRIVATE PS4FFPSC_STANDALONE=1)
 target_include_directories(ps4_pkg_extract_pkg_tests PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/src"
   "${CMAKE_CURRENT_SOURCE_DIR}/compat"
   "${SHADPS4_PKG_ROOT}"
   "${CRYPTOPP_INCLUDE_DIR}")

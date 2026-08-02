@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import stat
 import struct
 from pathlib import Path
 from typing import Any
@@ -13,7 +15,7 @@ NPBIND_DIGEST_SIZE = 20
 _NPBIND_HEADER = struct.Struct(">IIQQQ")
 
 
-def validate_npbind(path: Path) -> dict[str, Any]:
+def inspect_npbind(path: Path) -> dict[str, Any]:
     data = path.read_bytes()
     minimum_size = NPBIND_HEADER_SIZE + NPBIND_DIGEST_SIZE
     if len(data) < minimum_size:
@@ -48,15 +50,55 @@ def validate_npbind(path: Path) -> dict[str, Any]:
         usedforsecurity=False,
     ).digest()
     stored_digest = data[-NPBIND_DIGEST_SIZE:]
-    if calculated_digest != stored_digest:
-        raise ValueError(
-            "npbind.dat SHA-1 footer mismatch: "
-            f"expected={calculated_digest.hex()}, actual={stored_digest.hex()}"
-        )
     return {
-        "status": "valid",
+        "status": "valid" if calculated_digest == stored_digest else "repairable_footer",
         "declared_size": declared_size,
         "entry_size": entry_size,
         "entry_count": entry_count,
         "sha1": stored_digest.hex(),
+        "calculated_sha1": calculated_digest.hex(),
+        "footer_valid": calculated_digest == stored_digest,
+    }
+
+
+def validate_npbind(path: Path) -> dict[str, Any]:
+    report = inspect_npbind(path)
+    if report["footer_valid"]:
+        return report
+    raise ValueError(
+        "npbind.dat SHA-1 footer mismatch: "
+        f"expected={report['calculated_sha1']}, actual={report['sha1']}"
+    )
+
+
+def repair_npbind_footer(path: Path) -> dict[str, Any]:
+    """Repair only a structurally valid SHA-1 footer via atomic replacement."""
+
+    mode = path.lstat().st_mode
+    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+        raise ValueError(f"npbind.dat must be a regular file: {path}")
+    report = inspect_npbind(path)
+    if report["footer_valid"]:
+        return {**report, "repaired": False}
+
+    data = path.read_bytes()
+    corrected = data[:-NPBIND_DIGEST_SIZE] + bytes.fromhex(
+        report["calculated_sha1"]
+    )
+    partial = path.with_name(f".{path.name}.footer-repair.partial")
+    if partial.exists():
+        partial.unlink()
+    try:
+        with partial.open("xb") as stream:
+            stream.write(corrected)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(partial, path)
+    finally:
+        partial.unlink(missing_ok=True)
+    verified = validate_npbind(path)
+    return {
+        **verified,
+        "repaired": True,
+        "previous_sha1": report["sha1"],
     }

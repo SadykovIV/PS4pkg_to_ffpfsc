@@ -54,11 +54,14 @@ def test_language_switch_retranslates_static_and_live_progress(
     window = MainWindow(tmp_path, Path(__file__).resolve().parents[1])
 
     assert window.scan_button.text() == "Сканировать"
+    assert "эксперимент" in window.dlc_experimental_label.text().lower()
     window.language_combo.setCurrentIndex(1)
     assert window.language == "en"
     assert window.scan_button.text() == "Scan"
     assert window.build_button.text() == "Check readiness"
     assert "No PKG" in window.source_label.text()
+    assert "experimental" in window.dlc_experimental_label.text().lower()
+    assert "experimental" in window.dlc_combo.itemText(1).lower()
 
     window.build_total_count = 1
     window.current_build_title = "CUSA12878"
@@ -521,6 +524,10 @@ def test_output_format_and_compression_are_selectable_persistent_and_passed_to_w
     window.compression_workers_spin.setValue(selected_workers)
     window.source_mode = "folder"
     window.source_folder = tmp_path
+    assert window.dlc_combo.currentData() == "off"
+    window.dlc_combo.setCurrentIndex(
+        window.dlc_combo.findData("single-experimental")
+    )
     arguments = window._base_arguments()
 
     level_index = arguments.index("--compression-level")
@@ -529,10 +536,11 @@ def test_output_format_and_compression_are_selectable_persistent_and_passed_to_w
     assert arguments[workers_index + 1] == str(selected_workers)
     assert arguments[arguments.index("--output-format") + 1] == "ffpfsc"
     assert arguments[arguments.index("--compat") + 1] == "current-smp"
-    assert arguments[arguments.index("--include-dlc") + 1] == "auto"
+    assert arguments[arguments.index("--dlc-mode") + 1] == "single-experimental"
+    assert "--include-dlc" not in arguments
     assert not hasattr(window, "compat_combo")
-    assert not hasattr(window, "dlc_combo")
     assert settings.value("compression_level", type=int) == 9
+    assert settings.value("dlc_mode", type=str) == "single-experimental"
 
     window.language_combo.setCurrentIndex(1)
     assert "maximum" in window.compression_combo.currentText()
@@ -558,7 +566,95 @@ def test_output_format_and_compression_are_selectable_persistent_and_passed_to_w
     assert restored.compression_combo.currentData() == 9
     assert restored.compression_workers_spin.value() == selected_workers
     assert restored.output_format_combo.currentData() == "exfat"
+    assert restored.dlc_combo.currentData() == "single-experimental"
     restored.close()
+    settings.clear()
+
+
+def test_experimental_dlc_build_requires_one_confirmation_per_batch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app = QApplication.instance() or QApplication([])
+    app.setApplicationName("PS4 FFPFSC experimental DLC confirmation test")
+    app.setOrganizationName("ps4ffpsc-tests")
+    settings = QSettings()
+    settings.clear()
+    settings.setValue("language", "ru")
+    base_path = tmp_path / "base.pkg"
+    base_path.write_bytes(b"pkg")
+    base = {
+        "path": str(base_path),
+        "size": base_path.stat().st_size,
+        "supported": True,
+        "kind": "base",
+        "app_version": "01.00",
+    }
+    dlc_path = tmp_path / "dlc.pkg"
+    dlc_path.write_bytes(b"dlc")
+    dlc = {
+        "path": str(dlc_path),
+        "size": dlc_path.stat().st_size,
+        "supported": True,
+        "kind": "dlc",
+        "entitlement_label": "EXAMPLE000000001",
+    }
+    window = MainWindow(tmp_path / "data", Path(__file__).resolve().parents[1])
+    window.source_mode = "files"
+    window.pkg_files = (base_path, dlc_path)
+    window.output_dir = tmp_path / "output"
+    window.temp_dir = tmp_path / "temporary"
+    window.inventory = {
+        "packages": [base, dlc],
+        "unsupported": [],
+        "games": {
+            "CUSA12345": {
+                "title": "DLC test",
+                "base": [base],
+                "patches": [],
+                "dlc": [dlc],
+                "unknown": [],
+                "buildable": True,
+                "conflicts": [],
+                "warnings": [],
+            }
+        },
+    }
+    window._populate_inventory()
+    window.dlc_combo.setCurrentIndex(
+        window.dlc_combo.findData("single-experimental")
+    )
+    answers = [
+        gui.QMessageBox.StandardButton.Cancel,
+        gui.QMessageBox.StandardButton.Yes,
+    ]
+    confirmations: list[tuple] = []
+
+    def confirm(*arguments):
+        confirmations.append(arguments)
+        return answers.pop(0)
+
+    monkeypatch.setattr(gui.QMessageBox, "warning", confirm)
+    started: list[bool] = []
+    window._start_next_build = lambda: started.append(True)
+
+    window._start_build()
+
+    assert started == []
+    assert window.build_queue == []
+    assert not window.output_dir.exists()
+    assert len(confirmations) == 1
+    assert "Эксперимент" in confirmations[0][1]
+    assert "не гарантируются" in confirmations[0][2]
+    assert confirmations[0][4] == gui.QMessageBox.StandardButton.Cancel
+
+    window._start_build()
+
+    assert started == [True]
+    assert window.build_queue == ["CUSA12345"]
+    assert len(confirmations) == 2
+    window.progress_timer.stop()
+    window.close()
     settings.clear()
 
 

@@ -6,6 +6,7 @@ from PyInstaller.utils.hooks import collect_submodules
 ROOT = Path(SPECPATH).parents[1]
 BUILD_ROOT = ROOT / "build-release-windows"
 HELPER = BUILD_ROOT / "helper" / "tools" / "ps4_pkg_extract" / "ps4_pkg_extract.exe"
+DLC_HELPER = BUILD_ROOT / "dlc-helper" / "ps4-dlc-patch.exe"
 ICON = BUILD_ROOT / "AppIcon.ico"
 VERSION_FILE = ROOT / "packaging" / "windows" / "version_info.txt"
 
@@ -20,7 +21,7 @@ a = Analysis(
         str(ROOT / "tools" / "ps4ffpsc"),
         str(ROOT / "third_party" / "mkpfs"),
     ],
-    binaries=[(str(HELPER), "bin")],
+    binaries=[(str(HELPER), "bin"), (str(DLC_HELPER), "bin")],
     datas=[
         (str(ROOT / "ps4ffpsc.toml"), "."),
         (str(ROOT / "LICENSE"), "."),

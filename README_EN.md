@@ -2,14 +2,19 @@
 
 **Languages:** [Русский](README.md) · **English**
 
+**Documentation:** [English](docs/README.md) ·
+[Русская](docs/ru/README.md)
+
 PS4 FFPFSC converts supported PS4 PKGs or an already unpacked PS4 game into
 images for **ShadowMountPlus**:
 
 - `.ffpfsc` — compressed image;
 - `.exfat` — uncompressed raw exFAT image.
 
-The application combines a base game, updates, and DLC, validates the resulting
+The application combines a base game and updates, validates the resulting
 layout, and never modifies the source PKGs or the selected unpacked tree.
+Version 0.2.8 also provides an experimental, opt-in mode that places selected
+DLC in the same image as the game.
 
 > [!WARNING]
 > This project is under active development. Compatibility with every game is not guaranteed. Even a successfully built image may still fail to start on a PS5.
@@ -20,8 +25,10 @@ layout, and never modifies the source PKGs or the selected unpacked tree.
   `Trophy registration failed. errcode=0x80551618`.
   This error can prevent some games from launching, including **Metro 2033**.
 - **Beyond: Two Souls:** the Russian voice-over currently does not play.
-- Version 0.2.7 creates separate verified DLC images, but their registration,
-  mounting, and runtime behavior still depend on the mounting environment.
+- **DLC (experimental):** single-image DLC is disabled by default, does not
+  support every game or DLC type, and may modify copies of game executables.
+  Source PKGs remain unchanged. A successful build and static verification do
+  not guarantee that a game will detect its DLC or start on a PS5.
 - Compressed FFPFSC images may perform worse in games that continuously stream large amounts of data.
 
 ## Features
@@ -31,10 +38,11 @@ layout, and never modifies the source PKGs or the selected unpacked tree.
 - automatic grouping of base, patch, explicit backport layers, and DLC;
 - duplicate detection; unchecked rejected PKGs do not block a selected game;
 - FFPFSC and raw exFAT output;
-- byte-for-byte preservation of the final `param.sfo`, with non-zero
-  `USER_DEFINED_PARAM_1…4` mirrored into `param.json`;
+- byte-for-byte preservation of the final `param.sfo`, with every available
+  localized `TITLE_00…29` and non-zero `USER_DEFINED_PARAM_1…4` projected into
+  a compatible `param.json`;
 - Windows Unicode paths, including Cyrillic and `™`;
-- separate verified DLC images in `auto` mode;
+- experimental opt-in packaging of selected DLC in one game image;
 - configurable compression level and worker thread count;
 - progress, elapsed time, and ETA;
 - safe cancellation;
@@ -48,7 +56,7 @@ self-contained and require neither Python nor external applications.
 
 ### Windows x64
 
-1. Fully extract `PS4-FFPFSC-v0.2.7-windows-x64.zip`.
+1. Fully extract `PS4-FFPFSC-v0.2.8-windows-x64.zip`.
 2. Run `PS4 FFPFSC.exe`.
 3. Keep the remaining files next to the executable.
 
@@ -56,7 +64,7 @@ Microsoft Defender SmartScreen may require manual confirmation on first launch b
 
 ### macOS ARM64
 
-1. Extract `PS4-FFPFSC-v0.2.7-macos-arm64.zip`.
+1. Extract `PS4-FFPFSC-v0.2.8-macos-arm64.zip`.
 2. Move `PS4 FFPFSC.app` to `/Applications`.
 3. On first launch, use **Control-click → Open**.
 
@@ -74,8 +82,11 @@ The current build uses ad-hoc signing.
    the ordinary update with the same version.
 4. Select **FFPFSC** or **raw exFAT**. For FFPFSC, also choose the compression
    level and worker count.
-5. Click **Build selected**.
-6. Copy the resulting image to a USB drive and add its path to ShadowMountPlus.
+5. Leave experimental DLC disabled for the normal verified build. Enable the
+   single-image DLC mode only deliberately: compatibility is game-specific and
+   must be tested on a PS5.
+6. Click **Build selected**.
+7. Copy the resulting image to a USB drive and add its path to ShadowMountPlus.
 
 PKG mode requires a base package with `CATEGORY=gd`. If only updates or DLC are
 found, the application reports that the base game is missing.
@@ -113,7 +124,13 @@ The ShadowMountPlus log is located at:
 
 ## What the application does not do
 
-The application does not search for keys, bypass DRM, download games, or convert unsupported or encrypted retail PKG files.
+The application does not search for or download external keys, bypass DRM,
+download games, or convert unsupported or encrypted retail PKG files. Only the
+explicitly enabled experimental DLC mode reads entitlement data from the
+selected supported add-on's own `license.dat`, keeps it in memory, and passes it
+to the local helper through standard input. Source PKGs and the selected
+unpacked tree remain unchanged, and raw entitlement data is not written to
+logs, reports, or temporary JSON files.
 
 Such files are marked as `unsupported_or_encrypted_pkg`, and processing continues with the remaining PKG files.
 

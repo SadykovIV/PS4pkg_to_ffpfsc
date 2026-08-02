@@ -12,6 +12,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Audit source-only checkout
+        run: ./scripts/audit_source_tree.sh .
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"

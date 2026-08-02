@@ -11,16 +11,45 @@ env:
   PYTHONIOENCODING: "utf-8"
 
 jobs:
+  dlc-template:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Audit source-only checkout
+        run: ./scripts/audit_source_tree.sh .
+      - name: Install module build tools
+        run: sudo apt-get update && sudo apt-get install -y clang lld
+      - name: Build pinned DLC module template from source
+        run: |
+          openorbis_root="$(./scripts/fetch_openorbis_toolchain.sh "${RUNNER_TEMP}/openorbis")"
+          ./scripts/build_dlc_module.sh \
+            "${openorbis_root}" "${RUNNER_TEMP}/dlcldr.prx"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dlc-template
+          path: ${{ runner.temp }}/dlcldr.prx
+          if-no-files-found: error
+          retention-days: 1
+
   build:
     runs-on: windows-2022
+    needs: dlc-template
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dlc-template
+          path: ${{ runner.temp }}/dlc-template
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.13.14"
           architecture: "x64"
           cache: "pip"
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
       - uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
@@ -35,6 +64,8 @@ jobs:
         run: pytest -q
       - name: Build and smoke-test standalone Windows x64 release
         shell: pwsh
+        env:
+          PS4FFPSC_DLC_TEMPLATE: ${{ runner.temp }}\dlc-template\dlcldr.prx
         run: ./scripts/build_release_windows_x64.ps1
       - uses: actions/upload-artifact@v4
         with:
