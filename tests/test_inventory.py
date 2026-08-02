@@ -3,8 +3,17 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from ps4ffpsc import inventory as inventory_module
-from ps4ffpsc.inventory import find_extractor, scan_packages
+from ps4ffpsc.inventory import (
+    PATCH_ROLE_ADDITIONAL_LAYER,
+    PATCH_ROLE_ORDINARY,
+    classify_patch_filename,
+    find_extractor,
+    ordered_patches,
+    scan_packages,
+)
 
 
 def _record(path: Path, sha: str, kind: str, title_id: str = "CUSA12345") -> dict:
@@ -145,3 +154,174 @@ def test_explicit_pkg_files_override_recursive_directory(monkeypatch, tmp_path: 
     assert hash_modes == [False]
     assert result["source_mode"] == "selected_files"
     assert result["selected_pkg_files"] == [str(selected.resolve())]
+
+
+@pytest.mark.parametrize(
+    ("filename", "reason"),
+    [
+        ("Game.Backport.pkg", "filename_marker:backport"),
+        ("Game.Back-Port.pkg", "filename_marker:back-port"),
+        ("Game-Fix5.05.pkg", "filename_marker:fix5.05"),
+    ],
+)
+def test_explicit_additional_layer_filename_markers(
+    filename: str,
+    reason: str,
+) -> None:
+    role, actual_reason = classify_patch_filename(Path(filename))
+
+    assert role == PATCH_ROLE_ADDITIONAL_LAYER
+    assert actual_reason == reason
+
+
+def test_same_version_explicit_layer_is_buildable_and_has_fixed_plan(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    base = pkg / "Overcooked.2.PS4-DUPLEX.pkg"
+    update = pkg / "Overcooked.2.Update.v1.10.PS4-DUPLEX.pkg"
+    fix = pkg / "UP4064-CUSA10940_00-OVERCOOKED200000-A0110-V0100(Fix5.05).pkg"
+    for path in (base, update, fix):
+        path.write_bytes(b"x")
+    records = {
+        base: _record(base, "a" * 64, "base", "CUSA10940"),
+        update: _record(update, "b" * 64, "patch", "CUSA10940"),
+        fix: _record(fix, "c" * 64, "patch", "CUSA10940"),
+    }
+    monkeypatch.setattr(
+        inventory_module,
+        "inspect_package",
+        lambda _extractor, path, compute_sha256=False: dict(records[path]),
+    )
+
+    result = scan_packages(tmp_path, pkg, tmp_path / "unpacked", tmp_path / "helper")
+    game = result["games"]["CUSA10940"]
+    patch_by_name = {Path(item["path"]).name: item for item in game["patches"]}
+
+    assert game["buildable"]
+    assert game["conflicts"] == []
+    assert patch_by_name[update.name]["patch_role"] == PATCH_ROLE_ORDINARY
+    assert patch_by_name[update.name]["patch_role_reason"] == "no_explicit_filename_marker"
+    assert patch_by_name[fix.name]["patch_role"] == PATCH_ROLE_ADDITIONAL_LAYER
+    assert patch_by_name[fix.name]["patch_role_reason"] == "filename_marker:fix5.05"
+    assert [item["source_id"] for item in game["patch_plan"]] == [
+        patch_by_name[update.name]["source_id"],
+        patch_by_name[fix.name]["source_id"],
+    ]
+    assert [item["role"] for item in game["patch_plan"]] == [
+        PATCH_ROLE_ORDINARY,
+        PATCH_ROLE_ADDITIONAL_LAYER,
+    ]
+
+
+def test_same_version_unmarked_variants_conflict_but_selected_subset_builds(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    base = pkg / "base.pkg"
+    first = pkg / "update-a.pkg"
+    second = pkg / "update-b.pkg"
+    for path in (base, first, second):
+        path.write_bytes(b"x")
+    records = {
+        base: _record(base, "a" * 64, "base"),
+        first: _record(first, "b" * 64, "patch"),
+        second: _record(second, "c" * 64, "patch"),
+    }
+    monkeypatch.setattr(
+        inventory_module,
+        "inspect_package",
+        lambda _extractor, path, compute_sha256=False: dict(records[path]),
+    )
+
+    all_files = scan_packages(tmp_path, pkg, tmp_path / "unpacked", tmp_path / "helper")
+    blocked = all_files["games"]["CUSA12345"]
+    assert not blocked["buildable"]
+    assert blocked["conflicts"] == ["conflicting_patch_version:01.10"]
+
+    selected = scan_packages(
+        tmp_path,
+        pkg,
+        tmp_path / "unpacked",
+        tmp_path / "helper",
+        (base, first),
+    )
+    ready = selected["games"]["CUSA12345"]
+    assert ready["buildable"]
+    assert ready["conflicts"] == []
+
+
+@pytest.mark.parametrize("app_version", ["", "v1.10"])
+def test_invalid_or_empty_patch_app_version_blocks_game_without_aborting_scan(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    app_version: str,
+) -> None:
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    base = pkg / "base.pkg"
+    patch = pkg / "bad-version.pkg"
+    for path in (base, patch):
+        path.write_bytes(b"x")
+    records = {
+        base: _record(base, "a" * 64, "base"),
+        patch: {
+            **_record(patch, "b" * 64, "patch"),
+            "app_version": app_version,
+        },
+    }
+    monkeypatch.setattr(
+        inventory_module,
+        "inspect_package",
+        lambda _extractor, path, compute_sha256=False: dict(records[path]),
+    )
+
+    result = scan_packages(tmp_path, pkg, tmp_path / "unpacked", tmp_path / "helper")
+
+    game = result["games"]["CUSA12345"]
+    assert not game["buildable"]
+    assert game["conflicts"] == ["invalid_patch_app_version"]
+    assert "invalid_app_version" in game["patches"][0]["validation_errors"]
+    assert game["patch_plan"][0]["app_version"] == app_version
+
+
+def test_patch_order_is_deterministic_when_input_order_is_reversed() -> None:
+    ordinary = {
+        "kind": "patch",
+        "supported": True,
+        "app_version": "01.10",
+        "path": "/tmp/z-ordinary.pkg",
+        "source_id": "stat-ordinary",
+        "patch_role": PATCH_ROLE_ORDINARY,
+    }
+    additional = {
+        "kind": "patch",
+        "supported": True,
+        "app_version": "01.10",
+        "path": "/tmp/a-Fix5.05.pkg",
+        "source_id": "stat-additional",
+        "patch_role": PATCH_ROLE_ADDITIONAL_LAYER,
+        "patch_role_reason": "filename_marker:fix5.05",
+    }
+    lower_version = {
+        "kind": "patch",
+        "supported": True,
+        "app_version": "01.05",
+        "path": "/tmp/mid.pkg",
+        "source_id": "stat-lower",
+        "patch_role": PATCH_ROLE_ORDINARY,
+    }
+
+    ordered = ordered_patches(
+        {"patches": [additional, ordinary, lower_version]}
+    )
+
+    assert [item["source_id"] for item in ordered] == [
+        "stat-lower",
+        "stat-ordinary",
+        "stat-additional",
+    ]

@@ -97,6 +97,16 @@ def _prepare_fake_pipeline(
         (app / "sce_sys" / "param.json").write_text(
             '{"titleId":"CUSA12345"}', encoding="utf-8"
         )
+        for item in game["dlc"]:
+            if item.get("duplicate_of"):
+                continue
+            label = item["entitlement_label"]
+            addcont = root / "merged" / "addcont" / label
+            addcont.mkdir(parents=True)
+            (addcont / "ps4ffpsc-dlc.json").write_text(
+                '{"title_id":"CUSA12345"}', encoding="utf-8"
+            )
+            (addcont / "content.bin").write_bytes(label.encode("ascii"))
         return {"latest_app_version": "01.00"}
 
     def fake_run(
@@ -149,6 +159,13 @@ def test_successful_build_removes_only_its_temporary_workspace(
             AssertionError("normal build must not hash file payloads")
         ),
     )
+    expected_output = (
+        settings.output_dir
+        / "CUSA12345 - Synthetic Game [v01.00].ffpfsc"
+    )
+    settings.output_dir.mkdir(parents=True)
+    stale_checksum = expected_output.with_name(f"{expected_output.name}.sha256")
+    stale_checksum.write_text("stale\n", encoding="utf-8")
 
     result = build_game(settings, "CUSA12345", inventory)
 
@@ -162,10 +179,195 @@ def test_successful_build_removes_only_its_temporary_workspace(
     assert result["compression_level"] == 9
     assert result["compression_workers"] == 4
     assert result["compression_workers_mode"] == "selected"
-    assert not output.with_name(f"{output.name}.sha256").exists()
+    assert not stale_checksum.exists()
     assert read_json(_artifact_sidecar_path(output, ".manifest.json"))[
         "temporary_workspace_cleaned"
     ] is True
+
+
+def test_transactional_publication_restores_existing_results_on_late_failure(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "game.ffpfsc"
+    checksum = tmp_path / "game.ffpfsc.sha256"
+    staged = tmp_path / "game.ffpfsc.partial"
+    destination.write_bytes(b"old image")
+    checksum.write_text("old checksum\n", encoding="utf-8")
+    staged.write_bytes(b"new image")
+
+    def fail_finalize() -> None:
+        raise RuntimeError("late cleanup failure")
+
+    with pytest.raises(RuntimeError, match="late cleanup failure"):
+        pipeline._publish_files_transactionally(
+            [(None, checksum), (staged, destination)],
+            fail_finalize,
+            allow_replace=True,
+        )
+
+    assert destination.read_bytes() == b"old image"
+    assert checksum.read_text(encoding="utf-8") == "old checksum\n"
+    assert not staged.exists()
+    assert not list(tmp_path.glob(".*.backup-*"))
+
+
+def test_missing_merged_dlc_tree_is_an_error_instead_of_silent_omission(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    game = {
+        "directory_name": "CUSA12345 - Synthetic Game",
+        "dlc": [
+            {
+                "source_id": "stat-missing-dlc",
+                "entitlement_label": "ABCDEFGHIJKLMNOP",
+            }
+        ],
+    }
+
+    with pytest.raises(FileNotFoundError, match="merged DLC source is missing"):
+        pipeline._pack_dlc_separate(
+            settings,
+            game,
+            tmp_path / "merged",
+            ["mkpfs"],
+            tmp_path / "build.log",
+            1,
+        )
+
+
+def test_default_auto_mode_publishes_detected_dlc_as_separate_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(tmp_path)
+    settings.include_dlc = "auto"
+    source = tmp_path / "source.pkg"
+    source.write_bytes(b"owned source")
+    inventory = _inventory(source)
+    game = inventory["games"]["CUSA12345"]
+    game["dlc"] = [
+        {
+            "kind": "dlc",
+            "supported": True,
+            "app_version": "",
+            "path": str(tmp_path / "dlc.pkg"),
+            "source_id": "stat-dlc",
+            "size": 1,
+            "entitlement_label": "ABCDEFGHIJKLMNOP",
+        }
+    ]
+    root = _prepare_fake_pipeline(monkeypatch, settings, inventory)
+    monkeypatch.setattr(
+        pipeline,
+        "_verify_image",
+        lambda *_args, **_kwargs: {"verified": True},
+    )
+    calls: list[str] = []
+
+    def fake_pack_dlc(
+        _settings: Settings,
+        _game: dict,
+        _merged_root: Path,
+        _mkpfs: list[str],
+        _log_path: Path,
+        _workers: int | None,
+    ) -> list[dict]:
+        calls.append(_game["title_id"])
+        output = settings.output_dir / "dlc.ffpfsc"
+        staged = output.with_name(f"{output.name}.partial")
+        staged.write_bytes(b"verified dlc")
+        return [
+            {
+                "path": str(output),
+                "_staged_path": str(staged),
+                "entitlement_label": "ABCDEFGHIJKLMNOP",
+                "runtime_supported": False,
+            }
+        ]
+
+    monkeypatch.setattr(pipeline, "_pack_dlc_separate", fake_pack_dlc)
+
+    result = build_game(settings, "CUSA12345", inventory)
+
+    assert calls == ["CUSA12345"]
+    assert result["dlc_detected"] is True
+    assert result["dlc_packaged"] is True
+    assert result["dlc_artifacts"][0]["entitlement_label"] == "ABCDEFGHIJKLMNOP"
+    assert (settings.output_dir / "dlc.ffpfsc").read_bytes() == b"verified dlc"
+    assert not root.exists()
+
+
+@pytest.mark.parametrize("failed_dlc_number", [1, 2])
+def test_auto_dlc_failure_rolls_back_every_new_artifact_and_allows_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failed_dlc_number: int,
+) -> None:
+    settings = _settings(tmp_path)
+    settings.include_dlc = "auto"
+    source = tmp_path / "source.pkg"
+    source.write_bytes(b"owned source")
+    inventory = _inventory(source)
+    game = inventory["games"]["CUSA12345"]
+    labels = ["ABCDEFGHIJKLMNOP", "QRSTUVWXYZ012345"]
+    game["dlc"] = [
+        {
+            "kind": "dlc",
+            "supported": True,
+            "app_version": "",
+            "path": str(tmp_path / f"dlc-{index}.pkg"),
+            "source_id": f"stat-dlc-{index}",
+            "size": 1,
+            "entitlement_label": label,
+        }
+        for index, label in enumerate(labels, start=1)
+    ]
+    root = _prepare_fake_pipeline(monkeypatch, settings, inventory)
+    monkeypatch.setattr(
+        pipeline,
+        "_verify_image",
+        lambda *_args, **_kwargs: {"verified": True},
+    )
+    state = {"fail": True, "dlc_number": 0}
+
+    def fail_selected_dlc(
+        command: list[str],
+        _log_path: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        destination = Path(command[-1])
+        destination.write_bytes(b"staged artifact")
+        if "[DLC " in destination.name:
+            state["dlc_number"] += 1
+            if state["fail"] and state["dlc_number"] == failed_dlc_number:
+                raise RuntimeError(f"DLC {failed_dlc_number} packing failed")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(pipeline, "_run_logged", fail_selected_dlc)
+
+    with pytest.raises(
+        RuntimeError,
+        match=rf"DLC {failed_dlc_number} packing failed",
+    ):
+        build_game(settings, "CUSA12345", inventory)
+
+    assert (root / "merged" / "app").is_dir()
+    assert not list(settings.output_dir.glob("*.ffpfsc"))
+    assert not list(settings.output_dir.glob("*.manifest.json"))
+    assert not list(settings.output_dir.glob("*.shadowmount.txt"))
+    assert not list(settings.output_dir.glob("*.partial"))
+
+    state["fail"] = False
+    state["dlc_number"] = 0
+    result = build_game(settings, "CUSA12345", inventory)
+
+    output = Path(result["artifact"])
+    assert output.is_file()
+    assert len(result["dlc_artifacts"]) == 2
+    assert all(Path(item["path"]).is_file() for item in result["dlc_artifacts"])
+    assert _artifact_sidecar_path(output, ".manifest.json").is_file()
+    assert _artifact_sidecar_path(output, ".shadowmount.txt").is_file()
+    assert not list(settings.output_dir.glob("*.partial"))
 
 
 def test_mkpfs_compression_arguments_use_selected_level_and_default_half_cpus(
@@ -344,6 +546,62 @@ def test_unpack_does_not_hash_source_or_extracted_payloads(
     assert package["source_id"].startswith("stat-")
     assert "sha256" not in package
     assert manifest["extractions"][0]["tree_signature"].startswith("stat-")
+
+
+def test_unpack_manifest_records_explicit_same_version_layer_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(tmp_path)
+    settings.dry_run = True
+    base_source = tmp_path / "base.pkg"
+    update_source = tmp_path / "ordinary-update.pkg"
+    fix_source = tmp_path / "update-Fix5.05.pkg"
+    for source in (base_source, update_source, fix_source):
+        source.write_bytes(b"source")
+    inventory = _inventory(base_source)
+    game = inventory["games"]["CUSA12345"]
+    update = {
+        "kind": "patch",
+        "supported": True,
+        "app_version": "01.10",
+        "path": str(update_source),
+        "size": update_source.stat().st_size,
+        "patch_role": "ordinary",
+        "patch_role_reason": "no_explicit_filename_marker",
+    }
+    fix = {
+        "kind": "patch",
+        "supported": True,
+        "app_version": "01.10",
+        "path": str(fix_source),
+        "size": fix_source.stat().st_size,
+        "patch_role": "additional_layer",
+        "patch_role_reason": "filename_marker:fix5.05",
+    }
+    game["patches"] = [fix, update]
+    monkeypatch.setattr(pipeline, "check_disk_space", lambda *_args: None)
+    monkeypatch.setattr(
+        pipeline,
+        "extractor_or_raise",
+        lambda *_args: tmp_path / "extractor",
+    )
+
+    manifest = pipeline.unpack_game(settings, inventory, "CUSA12345")
+
+    assert [item["source_id"] for item in manifest["patch_plan"]] == [
+        update["source_id"],
+        fix["source_id"],
+    ]
+    assert [item["role"] for item in manifest["patch_plan"]] == [
+        "ordinary",
+        "additional_layer",
+    ]
+    assert [Path(item["path"]).name for item in manifest["packages"]] == [
+        "base.pkg",
+        "ordinary-update.pkg",
+        "update-Fix5.05.pkg",
+    ]
 
 
 def test_unpack_resumes_verified_pkg_and_extracts_only_pending_pkg(

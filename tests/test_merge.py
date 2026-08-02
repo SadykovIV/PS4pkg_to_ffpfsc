@@ -64,28 +64,47 @@ def test_synthetic_base_patch_overlay_and_param_json(tmp_path: Path) -> None:
     (patch_dir / "sce_sys").mkdir(parents=True)
     (base_dir / "eboot.bin").write_bytes(b"base executable")
     (base_dir / "data.bin").write_bytes(b"old")
-    (base_dir / "sce_sys" / "param.sfo").write_bytes(
-        make_sfo({"TITLE_ID": "CUSA12345", "TITLE": "Игра", "APP_VER": "01.00", "CATEGORY": "gd"})
+    base_param_sfo = make_sfo(
+        {
+            "TITLE_ID": "CUSA12345",
+            "TITLE": "Игра",
+            "APP_VER": "01.00",
+            "CATEGORY": "gd",
+        }
     )
+    (base_dir / "sce_sys" / "param.sfo").write_bytes(base_param_sfo)
     original_param_json = (
         b'{\n  "gameIntent": {"permittedIntents": '
         b'[{"intentType": "joinSession"}]}\n}\n'
     )
     (base_dir / "sce_sys" / "param.json").write_bytes(original_param_json)
     (patch_dir / "data.bin").write_bytes(b"new")
-    (patch_dir / "sce_sys" / "param.sfo").write_bytes(
-        make_sfo({"TITLE_ID": "CUSA12345", "TITLE": "Игра", "APP_VER": "01.10", "CATEGORY": "gp"})
+    patch_param_sfo = make_sfo(
+        {
+            "TITLE_ID": "CUSA12345",
+            "TITLE": "Игра",
+            "APP_VER": "01.10",
+            "CATEGORY": "gp",
+            "USER_DEFINED_PARAM_1": 2,
+            "USER_DEFINED_PARAM_2": 0,
+        }
     )
+    (patch_dir / "sce_sys" / "param.sfo").write_bytes(patch_param_sfo)
     report = merge_game(settings, inventory, "CUSA12345")
     merged = root / "merged" / "app"
     assert (merged / "data.bin").read_bytes() == b"new"
-    assert parse_sfo(merged / "sce_sys" / "param.sfo")["APP_VER"] == "01.10"
+    merged_param_sfo = merged / "sce_sys" / "param.sfo"
+    assert merged_param_sfo.read_bytes() == patch_param_sfo
+    assert parse_sfo(merged_param_sfo)["APP_VER"] == "01.10"
+    assert parse_sfo(merged_param_sfo)["CATEGORY"] == "gp"
     merged_param_json = validate_shadowmount_param_json(
         (merged / "sce_sys" / "param.json").read_bytes(), "CUSA12345"
     )
     assert merged_param_json["gameIntent"]["permittedIntents"] == [
         {"intentType": "joinSession"}
     ]
+    assert merged_param_json["userDefinedParam1"] == 2
+    assert "userDefinedParam2" not in merged_param_json
     assert (base_dir / "sce_sys" / "param.json").read_bytes() == original_param_json
     replacement = next(item for item in report["overlay_changes"] if item["path"] == "data.bin")
     assert replacement["previous_size"] == 3
@@ -93,6 +112,7 @@ def test_synthetic_base_patch_overlay_and_param_json(tmp_path: Path) -> None:
     assert report["delta_patch_warning"]
     assert not report["generated_param_json"]
     assert report["normalized_existing_param_json"]
+    assert report["mirrored_user_defined_params"] == {"userDefinedParam1": 2}
     assert not report["ps5_runtime_verified"]
 
 
@@ -159,6 +179,80 @@ def test_patch_can_replace_path_with_case_only_name_change(tmp_path: Path) -> No
         if item["path"] == "Media/Modules/Il2cppUserAssemblies.prx"
     )
     assert rename["case_renamed_from"] == "Media/Modules/Il2CppUserAssemblies.prx"
+
+
+def test_same_version_additional_layer_has_fixed_overlay_order(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    base = _pkg("base", "e" * 64, "01.00")
+    update = _pkg("patch", "f" * 64, "01.10")
+    update["path"] = "/mock/original-update.pkg"
+    update["patch_role"] = "ordinary"
+    update["patch_role_reason"] = "no_explicit_filename_marker"
+    fix = _pkg("patch", "0" * 64, "01.10")
+    fix["path"] = "/mock/update-Fix5.05.pkg"
+    fix["patch_role"] = "additional_layer"
+    fix["patch_role_reason"] = "filename_marker:fix5.05"
+    game = {
+        "title_id": "CUSA10940",
+        "title": "Overcooked 2",
+        "directory_name": "CUSA10940 - Overcooked 2",
+        "base": [base],
+        # Deliberately reverse the input order: the plan, not list position,
+        # must put the ordinary update before the explicitly marked layer.
+        "patches": [fix, update],
+        "dlc": [],
+        "unknown": [],
+        "conflicts": [],
+        "warnings": [],
+        "buildable": True,
+    }
+    inventory = {"games": {"CUSA10940": game}}
+    root = settings.unpacked_dir / game["directory_name"]
+    atomic_write_json(
+        root / "manifest.json",
+        {"synthetic": True, "extractor_revision": EXTRACTOR_REVISION},
+    )
+    base_dir = package_destination(root, base)
+    update_dir = package_destination(root, update)
+    fix_dir = package_destination(root, fix)
+    for directory in (base_dir, update_dir, fix_dir):
+        (directory / "sce_sys").mkdir(parents=True)
+    (base_dir / "eboot.bin").write_bytes(b"base executable")
+    (base_dir / "data.bin").write_bytes(b"base")
+    (base_dir / "sce_sys" / "param.sfo").write_bytes(
+        make_sfo(
+            {
+                "TITLE_ID": "CUSA10940",
+                "TITLE": "Overcooked 2",
+                "APP_VER": "01.00",
+                "CATEGORY": "gd",
+            }
+        )
+    )
+    (update_dir / "data.bin").write_bytes(b"ordinary-update")
+    (update_dir / "sce_sys" / "param.sfo").write_bytes(
+        make_sfo(
+            {
+                "TITLE_ID": "CUSA10940",
+                "TITLE": "Overcooked 2",
+                "APP_VER": "01.10",
+                "CATEGORY": "gp",
+            }
+        )
+    )
+    (fix_dir / "data.bin").write_bytes(b"additional-layer")
+
+    report = merge_game(settings, inventory, "CUSA10940")
+
+    assert (root / "merged" / "app" / "data.bin").read_bytes() == b"additional-layer"
+    assert [entry["source_id"] for entry in report["patch_order"]] == [
+        update["source_id"],
+        fix["source_id"],
+    ]
+    assert [entry["role"] for entry in report["patch_order"]] == [
+        "ordinary",
+        "additional_layer",
+    ]
 
 
 def test_merge_discards_workspace_from_older_extractor_revision(

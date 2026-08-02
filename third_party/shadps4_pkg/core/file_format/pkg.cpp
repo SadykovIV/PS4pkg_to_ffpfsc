@@ -4,6 +4,7 @@
 #include <zlib.h>
 #include "common/io_file.h"
 #include "common/logging/formatter.h"
+#include "common/utf8_path.h"
 #include "core/file_format/pkg.h"
 #include "core/file_format/pkg_type.h"
 
@@ -434,7 +435,7 @@ bool PKG::Extract(const std::filesystem::path& filepath, const std::filesystem::
                 if (table.type == PFS_CURRENT_DIR) {
                     current_dir = extractPaths[table.inode];
                 }
-                extractPaths[table.inode] = current_dir / std::filesystem::path(table.name);
+                extractPaths[table.inode] = current_dir / PS4FFPSC::PathFromUtf8(table.name);
 
                 if (table.type == PFS_FILE || table.type == PFS_DIR) {
                     if (table.type == PFS_DIR) { // Create dirs.

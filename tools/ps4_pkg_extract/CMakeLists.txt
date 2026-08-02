@@ -40,12 +40,29 @@ target_link_libraries(ps4_pkg_extract PRIVATE ZLIB::ZLIB "${CRYPTOPP_LIBRARY}")
 
 set_target_properties(ps4_pkg_extract PROPERTIES
   POSITION_INDEPENDENT_CODE ON)
+if(WIN32 AND MINGW)
+  # MinGW needs this explicitly to select wmainCRTStartup for the wide entrypoint.
+  target_link_options(ps4_pkg_extract PRIVATE -municode)
+endif()
 if(MSVC AND PS4FFPSC_STATIC_CRYPTOPP)
   set_property(TARGET ps4_pkg_extract PROPERTY
     MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
 add_test(NAME ps4_pkg_extract_help COMMAND ps4_pkg_extract --help)
+
+add_executable(ps4_pkg_extract_unicode_path_tests
+  tests/unicode_path_tests.cpp)
+target_compile_features(ps4_pkg_extract_unicode_path_tests PRIVATE cxx_std_23)
+target_include_directories(ps4_pkg_extract_unicode_path_tests PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/compat")
+add_test(NAME ps4_pkg_extract_unicode_path_tests
+  COMMAND ps4_pkg_extract_unicode_path_tests)
+add_test(NAME ps4_pkg_extract_unicode_path_integration
+  COMMAND "${CMAKE_COMMAND}"
+    "-DHELPER=$<TARGET_FILE:ps4_pkg_extract>"
+    "-DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/unicode_path_integration"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/unicode_path_integration.cmake")
 
 add_executable(ps4_pkg_extract_crypto_tests
   tests/crypto_tests.cpp

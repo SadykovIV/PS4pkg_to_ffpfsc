@@ -11,6 +11,54 @@ self-contained and require neither Python nor external applications.
 
 ## Русский
 
+### 0.2.7
+
+#### Добавлено
+
+- Третий режим источника: готовое распакованное дерево игры. Поддерживается
+  плоский каталог с `eboot.bin` и `sce_sys/param.sfo`, а также структура
+  `app/` + необязательный `patch/`, создаваемая игровыми дамперами. Исходное
+  дерево используется только для чтения и никогда не переносится при merge.
+- Поддержка явно обозначенных backport-слоёв. Имена с `backport`, `back-port`
+  или `Fix<версия прошивки>` распознаются как дополнительный patch той же
+  версии; порядок фиксируется как `base → обычные update → backport` и
+  сохраняется в inventory и manifest.
+- Ненулевые `USER_DEFINED_PARAM_1…4` из итогового `param.sfo` дополнительно
+  зеркалируются как `userDefinedParam1…4` в `param.json` для совместимости
+  запуска из образа. Сам `param.sfo` остаётся источником истины и сохраняется
+  без переписывания.
+- При наличии выбранных DLC режим `auto` теперь действительно создаёт
+  отдельные проверенные DLC-образы вместо удаления подготовленного staging.
+
+#### Исправлено
+
+- Итоговый `param.sfo` теперь гарантированно остаётся байтовой копией
+  последнего overlay: `CATEGORY=gp`, `APP_VER`, пользовательские параметры и
+  другие поля патча больше не нормализуются по base-SFO.
+- Windows extractor принимает Unicode-пути через широкую точку входа и
+  сериализует пути как UTF-8. Исправлена обработка `™`, кириллицы и других
+  символов как в имени PKG, так и во внутренних путях игры.
+- Неподдерживаемые PKG остаются предупреждением и не блокируют сборку
+  отмеченной поддерживаемой игры.
+- Два разных patch одной версии больше не блокируют Overcooked 2, если один из
+  них явно является backport-слоем. Неоднозначные варианты без маркера
+  по-прежнему безопасно блокируются; в GUI лишний неоднозначный patch можно
+  снять и собрать оставшийся валидный набор.
+- Пустой или некорректный `APP_VER` блокирует только затронутую игру и больше
+  не завершает всё сканирование с исключением.
+- `unpack` и `merge` в CLI всегда пересканируют явно выбранные источники, а
+  `list` показывает фактический порядок наложения patch.
+- Resume распакованного дерева сравнивает полный tree signature и не
+  переиспользует merge после изменения исходного файла.
+- Добавлена проверка пересечения распакованного источника с временной рабочей
+  областью и папкой результата. В GUI компоненты такого источника отображаются
+  информационно, а выбор относится ко всему контейнеру.
+- Публикация основного образа и отдельных DLC-артефактов стала атомарной:
+  ошибка DLC не оставляет частичный набор, блокирующий повтор без `--force`.
+- Создание иконки macOS больше не зависит от сломанного направления
+  `iconset → icns` системной утилиты `iconutil` в macOS 26. Полный ICNS с
+  вариантами 16–1024 пикселей формируется воспроизводимо самим проектом.
+
 ### 0.2.6
 
 #### Добавлено
@@ -162,6 +210,53 @@ self-contained and require neither Python nor external applications.
 ---
 
 ## English
+
+### 0.2.7
+
+#### Added
+
+- A third source mode for an already unpacked game tree. Both a flat root with
+  `eboot.bin` and `sce_sys/param.sfo`, and a dumper-style `app/` plus optional
+  `patch/` layout are accepted. The selected tree remains read-only and is
+  never consumed by the merge operation.
+- Explicit backport-layer support. Names containing `backport`, `back-port`,
+  or `Fix<firmware version>` are treated as an additional same-version patch;
+  the fixed `base → ordinary updates → backport` order is recorded in the
+  inventory and every build manifest.
+- Non-zero `USER_DEFINED_PARAM_1…4` values from the final `param.sfo` are also
+  projected as `userDefinedParam1…4` in `param.json` for image-launch
+  compatibility. The original SFO remains authoritative and unchanged.
+- With selected DLC, `auto` now emits separate verified DLC images instead of
+  discarding the prepared staging tree.
+
+#### Fixed
+
+- The final `param.sfo` is guaranteed to remain a byte-for-byte copy of the
+  last overlay. Patch `CATEGORY=gp`, `APP_VER`, user parameters, and other SFO
+  fields are no longer normalized from the base package.
+- The Windows helper now accepts wide command-line paths and serializes paths
+  as UTF-8, fixing `™`, Cyrillic, and other non-ASCII characters in source PKG
+  names and internal game paths.
+- Unsupported PKGs remain warnings and no longer block a checked supported
+  game.
+- Same-version Overcooked 2 update and Fix5.05 packages can be composed when
+  the latter is an explicit backport layer; ambiguous unmarked alternatives
+  remain safely blocked. The GUI can deselect one ambiguous patch and build
+  the remaining valid subset.
+- An empty or malformed `APP_VER` now blocks only the affected game instead of
+  terminating the complete scan with an exception.
+- CLI `unpack` and `merge` always rescan explicitly selected sources, while
+  `list` reports the actual patch overlay order.
+- Unpacked-tree resume compares the complete tree signature and never reuses a
+  merge after a source file changes.
+- Unpacked sources are checked against temporary-workspace and output-path
+  overlap. Their GUI component rows are informational, with selection applied
+  to the complete container.
+- Main-image and separate-DLC publication is atomic: a DLC failure leaves no
+  partial new set that would require `--force` before retrying.
+- macOS icon generation no longer depends on the broken `iconset → icns`
+  direction of the system `iconutil` on macOS 26. The project now emits a
+  complete, reproducible ICNS with 16-through-1024-pixel representations.
 
 ### 0.2.6
 

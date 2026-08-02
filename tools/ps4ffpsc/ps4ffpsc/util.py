@@ -110,6 +110,18 @@ def ensure_within(root: Path, candidate: Path) -> Path:
     return candidate_resolved
 
 
+def path_is_within(candidate: Path, parent: Path) -> bool:
+    """Return whether candidate is parent itself or a descendant, after resolution."""
+    candidate_resolved = candidate.expanduser().resolve(strict=False)
+    parent_resolved = parent.expanduser().resolve(strict=False)
+    return candidate_resolved == parent_resolved or parent_resolved in candidate_resolved.parents
+
+
+def paths_overlap(first: Path, second: Path) -> bool:
+    """Return whether two resolved paths contain one another."""
+    return path_is_within(first, second) or path_is_within(second, first)
+
+
 def iter_tree_files(root: Path) -> Iterable[tuple[Path, Path]]:
     if root.is_symlink():
         raise ValueError(f"symlink tree root is forbidden: {root}")

@@ -7,7 +7,7 @@ game.ffpfsc (compressed outer PFS)
 └── CUSAxxxxx.exfat
     ├── eboot.bin
     ├── sce_sys/param.sfo
-    ├── sce_sys/param.json   # current-smp
+    ├── sce_sys/param.json   # current-smp compatibility projection
     └── remaining game files
 ```
 
@@ -24,3 +24,9 @@ second full-tree content-hash pass.
 Host verification does not validate PS5 kernel mount behavior. PFSC performance
 is expected to be below direct exFAT/UFS because decompression throughput is
 limited.
+
+The final `param.sfo` is the exact SFO from the last selected overlay; patch
+`CATEGORY=gp`, version, and user-defined values are not rewritten from the base
+package. `param.json` remains a small compatibility projection. Non-zero
+`USER_DEFINED_PARAM_1…4` values are mirrored as `userDefinedParam1…4` because
+some image-launched PS4 titles use those selectors for language/region state.

@@ -12,9 +12,16 @@ import threading
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
-from .inventory import find_extractor, inspect_package, scan_packages
+from .inventory import (
+    find_extractor,
+    inspect_package,
+    ordered_patches,
+    patch_build_plan,
+    scan_dump_directories,
+    scan_packages,
+)
 from .npbind import validate_npbind
 from .runtime import (
     is_frozen,
@@ -27,6 +34,8 @@ from .util import (
     ensure_within,
     file_stat_identity,
     iter_tree_files,
+    path_is_within,
+    paths_overlap,
     read_json,
     safe_remove_tree,
     sha256_file,
@@ -66,6 +75,7 @@ class Settings:
     verbose: bool = False
     keep_inner_image: bool = False
     pkg_files: tuple[Path, ...] = ()
+    dump_dirs: tuple[Path, ...] = ()
     console_log: bool = False
     resource_root: Path | None = None
 
@@ -120,6 +130,18 @@ class Settings:
             raise ValueError(
                 "--keep-inner-image applies only to FFPFSC output"
             )
+        dump_dirs = tuple(
+            Path(item).expanduser().resolve()
+            for item in (getattr(args, "dump_dir", None) or [])
+        )
+        pkg_files = tuple(
+            Path(item).expanduser().resolve()
+            for item in (getattr(args, "pkg_file", None) or [])
+        )
+        if dump_dirs and (pkg_files or getattr(args, "pkg_dir", None)):
+            raise ValueError(
+                "--dump-dir cannot be combined with --pkg-file or --pkg-dir"
+            )
         return cls(
             root=root,
             pkg_dir=resolve("pkg_dir", "pkg"),
@@ -142,10 +164,8 @@ class Settings:
             json_output=bool(getattr(args, "json", False)),
             verbose=bool(getattr(args, "verbose", False)),
             keep_inner_image=keep_inner_image,
-            pkg_files=tuple(
-                Path(item).expanduser().resolve()
-                for item in (getattr(args, "pkg_file", None) or [])
-            ),
+            pkg_files=pkg_files,
+            dump_dirs=dump_dirs,
             console_log=bool(getattr(args, "console_log", False)),
             resource_root=resources,
         )
@@ -203,6 +223,12 @@ def load_or_scan(settings: Settings, refresh: bool = False) -> dict[str, Any]:
     if not refresh and inventory_path(settings).exists():
         return read_json(inventory_path(settings))
     settings.unpacked_dir.mkdir(parents=True, exist_ok=True)
+    if settings.dump_dirs:
+        return scan_dump_directories(
+            settings.root,
+            settings.dump_dirs,
+            settings.unpacked_dir,
+        )
     return scan_packages(
         settings.root,
         settings.pkg_dir,
@@ -225,7 +251,45 @@ def game_root(settings: Settings, game: dict[str, Any]) -> Path:
     return settings.unpacked_dir / game["directory_name"]
 
 
+def _validate_dump_source_boundaries(
+    settings: Settings,
+    game: dict[str, Any],
+    root: Path,
+) -> None:
+    sources: list[Path] = []
+    for key in ("base", "patches", "dlc"):
+        for package in game.get(key, []):
+            if package.get("source_kind") != "dump_tree":
+                continue
+            source_value = package.get("path")
+            if isinstance(source_value, str) and source_value:
+                sources.append(Path(source_value).expanduser().resolve(strict=False))
+
+    for source in sources:
+        for label, workspace in (
+            ("temporary game workspace", root),
+            ("unpacked workspace", settings.unpacked_dir),
+            ("work directory", settings.work_dir),
+            ("temporary files directory", settings.temp_dir),
+        ):
+            if paths_overlap(source, workspace):
+                raise ValueError(
+                    "unpacked game source overlaps the application's "
+                    f"{label}; choose a different temporary directory: {source}"
+                )
+        if path_is_within(settings.output_dir, source):
+            raise ValueError(
+                "output directory must not be inside the selected unpacked "
+                f"game source: {settings.output_dir}"
+            )
+
+
 def package_destination(root: Path, package: dict[str, Any]) -> Path:
+    if package.get("source_kind") == "dump_tree":
+        source = Path(str(package.get("path", ""))).expanduser().resolve()
+        if not source.is_dir():
+            raise FileNotFoundError(f"unpacked game source is missing: {source}")
+        return source
     identity = (
         package.get("source_id")
         or package.get("scan_id")
@@ -350,6 +414,21 @@ def _save_state(root: Path, state: dict[str, Any]) -> None:
 
 def _refresh_package_source_identity(package: dict[str, Any]) -> str:
     source = Path(package["path"])
+    if package.get("source_kind") == "dump_tree":
+        manifest = tree_stat_manifest(source)
+        current = tree_stat_signature(manifest)
+        previous = package.get("source_id") or package.get("scan_id")
+        if previous and previous != current:
+            raise RuntimeError(
+                f"unpacked game source changed after scanning; scan again: {source}"
+            )
+        stat_result = source.stat()
+        package["source_id"] = current
+        package["tree_signature"] = current
+        package["size"] = sum(int(item["size"]) for item in manifest)
+        package["file_count"] = len(manifest)
+        package["source_mtime_ns"] = stat_result.st_mtime_ns
+        return current
     current = file_stat_identity(source)
     previous = package.get("source_id") or package.get("scan_id")
     if previous and previous.partition("-")[2] != current.partition("-")[2]:
@@ -399,10 +478,11 @@ def unpack_game(settings: Settings, inventory: dict[str, Any], title_id: str) ->
     if not game["buildable"]:
         raise RuntimeError(f"{title_id} is not buildable: {', '.join(game['conflicts'] or game['warnings'])}")
     root = game_root(settings, game)
+    _validate_dump_source_boundaries(settings, game, root)
     root.mkdir(parents=True, exist_ok=True)
     candidates = [
         item
-        for item in [*game["base"], *game["patches"], *game["dlc"]]
+        for item in [*game["base"], *ordered_patches(game), *game["dlc"]]
         if item.get("supported") and not item.get("duplicate_of")
     ]
     selected = candidates
@@ -414,11 +494,33 @@ def unpack_game(settings: Settings, inventory: dict[str, Any], title_id: str) ->
         len(selected),
     )
     resumed: dict[str, dict[str, Any]] = {}
+    direct_sources: dict[str, dict[str, Any]] = {}
     pending: list[dict[str, Any]] = []
     for package in selected:
         destination = package_destination(root, package)
         package["extracted_path"] = str(destination)
         source_id = package["source_id"]
+        if package.get("source_kind") == "dump_tree":
+            npbind_validation: dict[str, Any] | None = None
+            npbind = destination / "sce_sys" / "npbind.dat"
+            if npbind.is_file():
+                npbind_validation = validate_npbind(npbind)
+            record = {
+                "status": "verified_source_tree",
+                "source_path": package["path"],
+                "source_id": source_id,
+                "source_size": package.get("size"),
+                "source_mtime_ns": package.get("source_mtime_ns"),
+                "destination": str(destination),
+                "tree_signature": package.get("tree_signature") or source_id,
+                "file_count": package.get("file_count"),
+                "total_size": package.get("size"),
+                "source_preserved": True,
+            }
+            if npbind_validation is not None:
+                record["npbind_validation"] = npbind_validation
+            direct_sources[source_id] = record
+            continue
         saved = state["packages"].get(source_id)
         reusable = (
             _verified_resumable_extraction(saved, destination)
@@ -449,6 +551,25 @@ def unpack_game(settings: Settings, inventory: dict[str, Any], title_id: str) ->
         package["extracted_path"] = str(destination)
         source_id = package["source_id"]
         saved = state["packages"].get(source_id)
+        direct = direct_sources.get(source_id)
+        if direct is not None:
+            results.append(direct)
+            LOG.info("using verified unpacked game tree in place: %s", package["path"])
+            completed_source += package_source_size
+            _emit_gui_progress(
+                "extract",
+                current=completed_source,
+                total=source_total,
+                package_index=package_index,
+                package_total=selected_total,
+                package_name=Path(package["path"]).name,
+                package_bytes_current=package_source_size,
+                package_bytes_total=package_source_size,
+                package_source_size=package_source_size,
+                resumed=True,
+                source_kind="dump_tree",
+            )
+            continue
         reusable = resumed.get(source_id)
         if reusable is not None:
             results.append(reusable)
@@ -616,6 +737,7 @@ def unpack_game(settings: Settings, inventory: dict[str, Any], title_id: str) ->
         "title": game["title"],
         "original_title": game["title"],
         "directory_name": game["directory_name"],
+        "patch_plan": patch_build_plan(game),
         "packages": selected,
         "extractions": results,
         "updated_at": utc_now(),
@@ -711,7 +833,9 @@ def _copy_overlay(
         )
         new_size = source_file.stat().st_size if records_change else None
         staging_mode = stage_file_atomic(
-            source_file, target, consume_source=True
+            source_file,
+            target,
+            consume_source=package.get("source_kind") != "dump_tree",
         )
         if staging_mode == "linked":
             linked += 1
@@ -738,6 +862,7 @@ def merge_game(
 ) -> dict[str, Any]:
     game = game_or_raise(inventory, title_id)
     root = game_root(settings, game)
+    _validate_dump_source_boundaries(settings, game, root)
     manifest_path = root / "manifest.json"
     stale_extraction = (
         not manifest_path.exists()
@@ -749,10 +874,7 @@ def merge_game(
     base = [item for item in game["base"] if not item.get("duplicate_of")]
     if len(base) != 1 or game["conflicts"]:
         raise RuntimeError(f"{title_id} has no unambiguous base package")
-    patches = sorted(
-        (item for item in game["patches"] if not item.get("duplicate_of")),
-        key=lambda item: version_key(item["app_version"]),
-    )
+    patches = ordered_patches(game)
     dlc = [item for item in game["dlc"] if not item.get("duplicate_of")]
     merged = root / "merged"
     app = merged / "app"
@@ -847,6 +969,7 @@ def merge_game(
             title_id,
             choose_title(values),
             existing_param_json,
+            values,
         )
         if existing_param_json != shadowmount_param_json:
             atomic_write_json(
@@ -900,10 +1023,7 @@ def merge_game(
         "title": game["title"],
         "compatibility": compat,
         "base_package": base[0]["source_id"],
-        "patch_order": [
-            {"app_version": item["app_version"], "source_id": item["source_id"]}
-            for item in patches
-        ],
+        "patch_order": patch_build_plan(game),
         "latest_app_version": expected_version,
         "overlay_changes": changes,
         "staging_hardlinks": copy_stats["linked"],
@@ -914,6 +1034,12 @@ def merge_game(
         "delta_patch_warning": any("DELTA_PATCH" in item.get("pkg_flags", []) for item in patches),
         "generated_param_json": generated_param_json,
         "normalized_existing_param_json": normalized_param_json,
+        "mirrored_user_defined_params": {
+            f"userDefinedParam{index}": values[f"USER_DEFINED_PARAM_{index}"]
+            for index in range(1, 5)
+            if isinstance(values.get(f"USER_DEFINED_PARAM_{index}"), int)
+            and values[f"USER_DEFINED_PARAM_{index}"] != 0
+        },
         "param_sfo_preserved": True,
         "static_shadowmount_compatible": compat == "current-smp",
         "static_shadowmount_checks_passed": compat == "current-smp",
@@ -965,10 +1091,24 @@ def _resume_merged_game(
     try:
         manifest = read_json(manifest_path)
         report = read_json(report_path)
+        expected_patch_plan = patch_build_plan(game)
+        saved_patch_plan = manifest.get("patch_plan")
+        saved_patch_order = report.get("patch_order")
         if (
             report.get("title_id") != title_id
             or report.get("compatibility") != settings.compat
             or report.get("extractor_revision") != EXTRACTOR_REVISION
+        ):
+            return None
+        if expected_patch_plan:
+            if (
+                saved_patch_plan != expected_patch_plan
+                or saved_patch_order != expected_patch_plan
+            ):
+                return None
+        elif (
+            saved_patch_plan not in (None, [])
+            or saved_patch_order not in (None, [])
         ):
             return None
         saved_packages = {
@@ -979,7 +1119,7 @@ def _resume_merged_game(
         }
         current_packages = [
             item
-            for item in [*game["base"], *game["patches"], *game["dlc"]]
+            for item in [*game["base"], *ordered_patches(game), *game["dlc"]]
             if item.get("supported") and not item.get("duplicate_of")
         ]
         for package in current_packages:
@@ -987,13 +1127,29 @@ def _resume_merged_game(
             saved = saved_packages.get(str(source))
             if saved is None:
                 return None
-            current_id = file_stat_identity(source)
+            if package.get("source_kind") == "dump_tree":
+                source_manifest = tree_stat_manifest(source)
+                current_id = tree_stat_signature(source_manifest)
+                current_size = sum(
+                    int(item["size"]) for item in source_manifest
+                )
+                package["tree_signature"] = current_id
+                package["file_count"] = len(source_manifest)
+            else:
+                current_id = file_stat_identity(source)
+                current_size = source.stat().st_size
             saved_id = saved.get("source_id") or saved.get("scan_id")
-            if saved_id.partition("-")[2] != current_id.partition("-")[2]:
+            source_changed = (
+                saved_id != current_id
+                if package.get("source_kind") == "dump_tree"
+                else saved_id.partition("-")[2]
+                != current_id.partition("-")[2]
+            )
+            if source_changed:
                 return None
             stat_result = source.stat()
             package["source_id"] = current_id
-            package["size"] = stat_result.st_size
+            package["size"] = current_size
             package["source_mtime_ns"] = stat_result.st_mtime_ns
             package.pop("sha256", None)
             package.pop("sha256_verified", None)
@@ -1304,6 +1460,110 @@ def _artifact_sidecar_path(output: Path, suffix: str) -> Path:
     return output.with_name(f"{output.name}{suffix}")
 
 
+def _cleanup_staged_files(paths: list[Path]) -> None:
+    for path in reversed(list(dict.fromkeys(paths))):
+        try:
+            if path.is_file() or path.is_symlink():
+                path.unlink()
+        except OSError as error:
+            LOG.warning("could not remove staged artifact %s: %s", path, error)
+
+
+def _path_exists(path: Path) -> bool:
+    return path.exists() or path.is_symlink()
+
+
+def _publish_files_transactionally(
+    operations: list[tuple[Path | None, Path]],
+    finalize: Callable[[], None] | None = None,
+    *,
+    allow_replace: bool,
+) -> None:
+    destinations = [destination for _staged, destination in operations]
+    if len(set(destinations)) != len(destinations):
+        raise ValueError("duplicate artifact publication destination")
+    for staged, _destination in operations:
+        if staged is not None and (
+            not staged.is_file() or staged.is_symlink()
+        ):
+            raise FileNotFoundError(f"staged artifact is missing: {staged}")
+    if not allow_replace:
+        conflicts = [
+            destination
+            for staged, destination in operations
+            if staged is not None and _path_exists(destination)
+        ]
+        if conflicts:
+            raise FileExistsError(
+                f"artifact output exists; use --force: {conflicts[0]}"
+            )
+
+    backups: list[tuple[Path, Path]] = []
+    created: list[Path] = []
+    try:
+        for staged, destination in operations:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            existed = _path_exists(destination)
+            if existed and staged is not None and not allow_replace:
+                raise FileExistsError(
+                    f"artifact output exists; use --force: {destination}"
+                )
+            if existed:
+                descriptor, backup_name = tempfile.mkstemp(
+                    prefix=f".{destination.name}.backup-",
+                    dir=destination.parent,
+                )
+                os.close(descriptor)
+                backup = Path(backup_name)
+                try:
+                    os.replace(destination, backup)
+                except Exception:
+                    backup.unlink(missing_ok=True)
+                    raise
+                backups.append((destination, backup))
+            if staged is not None:
+                os.replace(staged, destination)
+                if not existed:
+                    created.append(destination)
+        if finalize is not None:
+            finalize()
+    except Exception as error:
+        rollback_errors: list[str] = []
+        for destination in reversed(created):
+            try:
+                if _path_exists(destination):
+                    destination.unlink()
+            except OSError as rollback_error:
+                rollback_errors.append(f"remove {destination}: {rollback_error}")
+        for destination, backup in reversed(backups):
+            try:
+                if _path_exists(backup):
+                    os.replace(backup, destination)
+            except OSError as rollback_error:
+                rollback_errors.append(
+                    f"restore {destination}: {rollback_error}"
+                )
+        _cleanup_staged_files(
+            [staged for staged, _destination in operations if staged is not None]
+        )
+        if rollback_errors:
+            raise RuntimeError(
+                "artifact publication failed and rollback was incomplete: "
+                + "; ".join(rollback_errors)
+            ) from error
+        raise
+
+    for _destination, backup in backups:
+        try:
+            backup.unlink(missing_ok=True)
+        except OSError as error:
+            LOG.warning(
+                "could not remove replaced artifact backup %s: %s",
+                backup,
+                error,
+            )
+
+
 def _detect_artifact_format(path: Path) -> str:
     with path.open("rb") as stream:
         header = stream.read(11)
@@ -1358,58 +1618,275 @@ def _pack_dlc_separate(
     compression_workers: int | None,
 ) -> list[dict[str, Any]]:
     artifacts: list[dict[str, Any]] = []
-    for item in (entry for entry in game["dlc"] if not entry.get("duplicate_of")):
-        label = item.get("entitlement_label") or f"UNKNOWN-{item['source_id'][-12:]}"
-        source = merged_root / "addcont" / label
-        if not source.is_dir():
-            continue
-        output = settings.output_dir / (
-            f"{game['directory_name']} [DLC {label}]"
-            f"{_artifact_extension(settings.output_format)}"
-        )
-        if output.exists() and not settings.force:
-            raise FileExistsError(f"DLC output exists; use --force: {output}")
-        partial = output.with_name(f"{output.name}.partial")
-        if partial.exists():
-            partial.unlink()
-        command = _pack_directory_command(
-            settings,
-            mkpfs,
-            source,
-            partial,
-            compression_workers,
-        )
-        _run_logged(command, log_path)
-        verification = _verify_image(
-            settings,
-            partial,
-            source,
-            "patched-smp",
-            required_files=["ps4ffpsc-dlc.json"],
-            image_format=settings.output_format,
-        )
-        os.replace(partial, output)
-        checksum_path = output.with_name(f"{output.name}.sha256")
-        if checksum_path.exists():
-            checksum_path.unlink()
-        artifacts.append(
-            {
-                "path": str(output),
-                "sha256": None,
-                "checksum_generated": False,
-                "entitlement_label": label,
-                "runtime_supported": False,
-                "output_format": settings.output_format,
-                "compression_level": (
-                    settings.compression_level
-                    if settings.output_format == "ffpfsc"
-                    else None
-                ),
-                "compression_workers": compression_workers,
-                "verification": verification,
-            }
-        )
+    staged_paths: list[Path] = []
+    try:
+        for item in (
+            entry for entry in game["dlc"] if not entry.get("duplicate_of")
+        ):
+            label = item.get("entitlement_label") or (
+                f"UNKNOWN-{item['source_id'][-12:]}"
+            )
+            source = merged_root / "addcont" / label
+            if not source.is_dir():
+                raise FileNotFoundError(
+                    f"merged DLC source is missing: {source}"
+                )
+            output = settings.output_dir / (
+                f"{game['directory_name']} [DLC {label}]"
+                f"{_artifact_extension(settings.output_format)}"
+            )
+            if _path_exists(output) and not settings.force:
+                raise FileExistsError(
+                    f"DLC output exists; use --force: {output}"
+                )
+            partial = output.with_name(f"{output.name}.partial")
+            if partial.exists():
+                partial.unlink()
+            staged_paths.append(partial)
+            command = _pack_directory_command(
+                settings,
+                mkpfs,
+                source,
+                partial,
+                compression_workers,
+            )
+            _run_logged(command, log_path)
+            verification = _verify_image(
+                settings,
+                partial,
+                source,
+                "patched-smp",
+                required_files=["ps4ffpsc-dlc.json"],
+                image_format=settings.output_format,
+            )
+            artifacts.append(
+                {
+                    "path": str(output),
+                    "_staged_path": str(partial),
+                    "sha256": None,
+                    "checksum_generated": False,
+                    "entitlement_label": label,
+                    "runtime_supported": False,
+                    "output_format": settings.output_format,
+                    "compression_level": (
+                        settings.compression_level
+                        if settings.output_format == "ffpfsc"
+                        else None
+                    ),
+                    "compression_workers": compression_workers,
+                    "verification": verification,
+                }
+            )
+    except Exception:
+        _cleanup_staged_files(staged_paths)
+        raise
     return artifacts
+
+
+def _publish_build_artifacts(
+    settings: Settings,
+    title_id: str,
+    game: dict[str, Any],
+    root: Path,
+    output: Path,
+    staged_output: Path,
+    inner_image: Path | None,
+    staged_inner_image: Path | None,
+    version: str,
+    verification: dict[str, Any],
+    compression_workers: int | None,
+    compression_workers_mode: str,
+    dlc_artifacts: list[dict[str, Any]],
+) -> dict[str, Any]:
+    staged_paths = [staged_output]
+    dlc_publications: list[tuple[Path, Path]] = []
+    for artifact in dlc_artifacts:
+        staged_value = artifact.pop("_staged_path", None)
+        if not staged_value:
+            raise RuntimeError("DLC artifact is missing its staged path")
+        staged = Path(staged_value)
+        destination = Path(artifact["path"])
+        staged_paths.append(staged)
+        dlc_publications.append((staged, destination))
+    if staged_inner_image is not None:
+        staged_paths.append(staged_inner_image)
+
+    manifest_path = _artifact_sidecar_path(output, ".manifest.json")
+    staged_manifest = manifest_path.with_name(f"{manifest_path.name}.partial")
+    staged_manifest_partial = staged_manifest.with_name(
+        f"{staged_manifest.name}.partial"
+    )
+    shadow_path = _artifact_sidecar_path(output, ".shadowmount.txt")
+    staged_shadow = shadow_path.with_name(f"{shadow_path.name}.partial")
+    staged_paths.extend(
+        [staged_manifest, staged_manifest_partial, staged_shadow]
+    )
+
+    try:
+        checksum_path = output.with_name(f"{output.name}.sha256")
+        artifact_manifest = {
+            "schema_version": 1,
+            "extractor_revision": EXTRACTOR_REVISION,
+            "artifact": str(output),
+            "sha256": None,
+            "checksum_generated": False,
+            "size": staged_output.stat().st_size,
+            "title_id": title_id,
+            "title": game["title"],
+            "app_version": version,
+            "compatibility": settings.compat,
+            "include_dlc": settings.include_dlc,
+            "patch_plan": patch_build_plan(game),
+            "source_packages": [
+                {
+                    "path": item["path"],
+                    "source_id": item["source_id"],
+                    "size": item.get("size"),
+                    "source_mtime_ns": item.get("source_mtime_ns"),
+                    "kind": item["kind"],
+                    "source_kind": item.get("source_kind", "pkg"),
+                    "app_version": item.get("app_version"),
+                    "patch_role": item.get("patch_role"),
+                    "patch_role_reason": item.get("patch_role_reason"),
+                }
+                for item in [
+                    *game["base"],
+                    *ordered_patches(game),
+                    *game["dlc"],
+                ]
+                if not item.get("duplicate_of")
+            ],
+            "inner_filesystem": "exfat",
+            "kept_inner_image": str(inner_image) if inner_image else None,
+            "output_format": settings.output_format,
+            "outer_container": (
+                "compressed_pfs"
+                if settings.output_format == "ffpfsc"
+                else None
+            ),
+            "compression_level": (
+                settings.compression_level
+                if settings.output_format == "ffpfsc"
+                else None
+            ),
+            "compression_workers": compression_workers,
+            "compression_workers_mode": compression_workers_mode,
+            "extra_top_level_directory": False,
+            "verification": verification,
+            "static_shadowmount_compatible": settings.compat == "current-smp",
+            "ps5_runtime_verified": False,
+            "dlc_detected": bool(game["dlc"]),
+            "dlc_packaged": bool(dlc_artifacts),
+            "dlc_in_main_ffpfsc": False,
+            "dlc_in_main_artifact": False,
+            "dlc_runtime_supported": False,
+            "dlc_artifacts": dlc_artifacts,
+            "dlc_runtime_reason": (
+                "Separate DLC images are verified but PS4 addcont mount/registration is not."
+                if dlc_artifacts
+                else "Bundle mode requires a companion ShadowMountPlus implementation and was not emitted."
+                if game["dlc"] and settings.include_dlc == "bundle"
+                else "DLC was prepared during the verified merge; temporary staging was removed."
+                if game["dlc"]
+                else "No DLC packages found."
+            ),
+            "temporary_workspace_cleaned": True,
+            "completed_at": utc_now(),
+        }
+
+        shadow_text = "\n".join(
+            [
+                f"Title: {game['title']}",
+                f"TITLE_ID: {title_id}",
+                f"APP_VER: {version}",
+                "Sources: "
+                + ", ".join(
+                    item["source_id"]
+                    for item in [*game["base"], *ordered_patches(game)]
+                    if not item.get("duplicate_of")
+                ),
+                "DLC: "
+                + (
+                    ", ".join(
+                        item.get("entitlement_label") or "unknown"
+                        for item in game["dlc"]
+                    )
+                    or "none"
+                ),
+                f"Compatibility: {settings.compat}",
+                f"Output format: {settings.output_format}",
+                (
+                    f"Compression level: {settings.compression_level}"
+                    if settings.output_format == "ffpfsc"
+                    else "Compression: not applicable (raw exFAT)"
+                ),
+                (
+                    f"Compression workers: {compression_workers} "
+                    f"({compression_workers_mode})"
+                    if settings.output_format == "ffpfsc"
+                    else "Compression workers: not applicable"
+                ),
+                "Recommended USB path: /mnt/usb0/ps4ffpsc/" + output.name,
+                "manual.lst: /mnt/usb0/ps4ffpsc/" + output.name,
+                "Expected ShadowMountPlus checks: nested exFAT mount, "
+                "root sce_sys/param.json, titleId parse, appmeta staging",
+                "static_shadowmount_compatible="
+                + str(settings.compat == "current-smp").lower(),
+                "ps5_runtime_verified=false",
+                (
+                    "DLC artifacts: "
+                    + ", ".join(
+                        Path(item["path"]).name for item in dlc_artifacts
+                    )
+                    if dlc_artifacts
+                    else "DLC artifacts: none"
+                ),
+                "DLC runtime support is not verified; addcont registration "
+                "requires runtime support.",
+                "",
+            ]
+        )
+
+        _cleanup_staged_files(
+            [staged_manifest, staged_manifest_partial, staged_shadow]
+        )
+        staged_shadow.write_text(shadow_text, encoding="utf-8")
+        atomic_write_json(staged_manifest, artifact_manifest)
+
+        operations: list[tuple[Path | None, Path]] = [
+            (None, checksum_path),
+            *[
+                (
+                    None,
+                    destination.with_name(f"{destination.name}.sha256"),
+                )
+                for _staged, destination in dlc_publications
+            ],
+            (staged_manifest, manifest_path),
+            (staged_shadow, shadow_path),
+            *dlc_publications,
+        ]
+        if inner_image is not None and staged_inner_image is not None:
+            operations.append((staged_inner_image, inner_image))
+        operations.append((staged_output, output))
+
+        def cleanup_workspace() -> None:
+            _emit_gui_progress("cleanup", current=0, total=1)
+            safe_remove_tree(root, settings.unpacked_dir)
+            _emit_gui_progress("cleanup", current=1, total=1)
+
+        _publish_files_transactionally(
+            operations,
+            cleanup_workspace,
+            allow_replace=settings.force,
+        )
+    except Exception:
+        _cleanup_staged_files(staged_paths)
+        raise
+
+    LOG.info("temporary game workspace removed after successful build: %s", root)
+    LOG.info("build completed: %s", output)
+    return artifact_manifest
 
 
 def build_game(
@@ -1429,10 +1906,8 @@ def build_game(
     if not game["buildable"]:
         raise RuntimeError(f"{title_id} skipped: {game['conflicts'] or game['warnings']}")
     root = game_root(settings, game)
-    patches = sorted(
-        (item for item in game["patches"] if not item.get("duplicate_of")),
-        key=lambda item: version_key(item["app_version"]),
-    )
+    _validate_dump_source_boundaries(settings, game, root)
+    patches = ordered_patches(game)
     base = [item for item in game["base"] if not item.get("duplicate_of")]
     version = (
         patches[-1]["app_version"]
@@ -1503,6 +1978,8 @@ def build_game(
     else:
         LOG.info("MkPFS output: uncompressed exFAT, cluster size 65536 bytes")
     inner_image: Path | None = None
+    inner_partial: Path | None = None
+    staged_build_paths = [partial]
     if settings.output_format == "ffpfsc" and settings.keep_inner_image:
         inner_image = output.with_name(f"{output.stem}.inner.exfat")
         if inner_image.exists() and not settings.force:
@@ -1512,20 +1989,24 @@ def build_game(
         inner_partial = inner_image.with_name(f"{inner_image.name}.partial")
         if inner_partial.exists():
             inner_partial.unlink()
-        _run_logged(
-            [
-                *mkpfs,
-                "pack",
-                "exfat",
-                str(app),
-                str(inner_partial),
-                "--cluster-size",
-                "65536",
-                "--no-progress",
-            ],
-            log_path,
-        )
-        os.replace(inner_partial, inner_image)
+        staged_build_paths.append(inner_partial)
+        try:
+            _run_logged(
+                [
+                    *mkpfs,
+                    "pack",
+                    "exfat",
+                    str(app),
+                    str(inner_partial),
+                    "--cluster-size",
+                    "65536",
+                    "--no-progress",
+                ],
+                log_path,
+            )
+        except Exception:
+            _cleanup_staged_files(staged_build_paths)
+            raise
         command = [
             *mkpfs,
             "pack",
@@ -1538,7 +2019,7 @@ def build_game(
             *compression_arguments,
             "--temp-folder",
             str(settings.temp_dir),
-            str(inner_image),
+            str(inner_partial),
             str(partial),
         ]
     else:
@@ -1556,144 +2037,45 @@ def build_game(
         if settings.output_format == "ffpfsc"
         else "creating uncompressed exFAT image",
     )
-    _run_logged(command, log_path)
-    LOG.info("stage 4/5: verifying the image and required files")
-    verification = _verify_image(
-        settings,
-        partial,
-        app,
-        settings.compat,
-        image_format=settings.output_format,
-    )
-    os.replace(partial, output)
-    dlc_artifacts: list[dict[str, Any]] = []
-    if settings.include_dlc == "separate" and game["dlc"]:
-        dlc_artifacts = _pack_dlc_separate(
+    try:
+        _run_logged(command, log_path)
+        LOG.info("stage 4/5: verifying the image and required files")
+        verification = _verify_image(
             settings,
-            game,
-            root / "merged",
-            mkpfs,
-            log_path,
-            compression_workers,
+            partial,
+            app,
+            settings.compat,
+            image_format=settings.output_format,
         )
-    LOG.info("stage 5/5: publishing output and cleaning temporary files")
-    checksum_path = output.with_name(f"{output.name}.sha256")
-    if checksum_path.exists():
-        checksum_path.unlink()
-    artifact_manifest = {
-        "schema_version": 1,
-        "extractor_revision": EXTRACTOR_REVISION,
-        "artifact": str(output),
-        "sha256": None,
-        "checksum_generated": False,
-        "size": output.stat().st_size,
-        "title_id": title_id,
-        "title": game["title"],
-        "app_version": version,
-        "compatibility": settings.compat,
-        "include_dlc": settings.include_dlc,
-        "source_packages": [
-            {
-                "path": item["path"],
-                "source_id": item["source_id"],
-                "size": item.get("size"),
-                "source_mtime_ns": item.get("source_mtime_ns"),
-                "kind": item["kind"],
-                "app_version": item.get("app_version"),
-            }
-            for item in [*game["base"], *game["patches"], *game["dlc"]]
-            if not item.get("duplicate_of")
-        ],
-        "inner_filesystem": "exfat",
-        "kept_inner_image": str(inner_image) if inner_image else None,
-        "output_format": settings.output_format,
-        "outer_container": (
-            "compressed_pfs"
-            if settings.output_format == "ffpfsc"
-            else None
-        ),
-        "compression_level": (
-            settings.compression_level
-            if settings.output_format == "ffpfsc"
-            else None
-        ),
-        "compression_workers": compression_workers,
-        "compression_workers_mode": compression_workers_mode,
-        "extra_top_level_directory": False,
-        "verification": verification,
-        "static_shadowmount_compatible": settings.compat == "current-smp",
-        "ps5_runtime_verified": False,
-        "dlc_packaged": bool(game["dlc"]),
-        "dlc_in_main_ffpfsc": False,
-        "dlc_in_main_artifact": False,
-        "dlc_runtime_supported": False,
-        "dlc_artifacts": dlc_artifacts,
-        "dlc_runtime_reason": (
-            "Separate DLC images are verified but PS4 addcont mount/registration is not."
-            if dlc_artifacts
-            else "Bundle mode requires a companion ShadowMountPlus implementation and was not emitted."
-            if game["dlc"] and settings.include_dlc == "bundle"
-            else "DLC was prepared during the verified merge; temporary staging was removed."
-            if game["dlc"]
-            else "No DLC packages found."
-        ),
-        "temporary_workspace_cleaned": False,
-        "completed_at": utc_now(),
-    }
-    manifest_path = _artifact_sidecar_path(output, ".manifest.json")
-    atomic_write_json(manifest_path, artifact_manifest)
-    shadow_path = _artifact_sidecar_path(output, ".shadowmount.txt")
-    shadow_path.write_text(
-        "\n".join(
-            [
-                f"Title: {game['title']}",
-                f"TITLE_ID: {title_id}",
-                f"APP_VER: {version}",
-                "PKG: "
-                + ", ".join(
-                    item["source_id"]
-                    for item in [*game["base"], *game["patches"]]
-                    if not item.get("duplicate_of")
-                ),
-                "DLC: "
-                + (
-                    ", ".join(item.get("entitlement_label") or "unknown" for item in game["dlc"])
-                    or "none"
-                ),
-                f"Compatibility: {settings.compat}",
-                f"Output format: {settings.output_format}",
-                (
-                    f"Compression level: {settings.compression_level}"
-                    if settings.output_format == "ffpfsc"
-                    else "Compression: not applicable (raw exFAT)"
-                ),
-                (
-                    f"Compression workers: {compression_workers} "
-                    f"({compression_workers_mode})"
-                    if settings.output_format == "ffpfsc"
-                    else "Compression workers: not applicable"
-                ),
-                "Recommended USB path: /mnt/usb0/ps4ffpsc/" + output.name,
-                "manual.lst: /mnt/usb0/ps4ffpsc/" + output.name,
-                "Expected ShadowMountPlus checks: nested exFAT mount, root sce_sys/param.json, "
-                "titleId parse, appmeta staging",
-                "static_shadowmount_compatible="
-                + str(settings.compat == "current-smp").lower(),
-                "ps5_runtime_verified=false",
-                "DLC runtime support is not verified; temporary DLC staging is removed after success.",
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    _emit_gui_progress("cleanup", current=0, total=1)
-    safe_remove_tree(root, settings.unpacked_dir)
-    artifact_manifest["temporary_workspace_cleaned"] = True
-    atomic_write_json(manifest_path, artifact_manifest)
-    _emit_gui_progress("cleanup", current=1, total=1)
-    LOG.info("temporary game workspace removed after successful build: %s", root)
-    LOG.info("build completed: %s", output)
-    return artifact_manifest
+        dlc_artifacts: list[dict[str, Any]] = []
+        if settings.include_dlc in {"auto", "separate"} and game["dlc"]:
+            dlc_artifacts = _pack_dlc_separate(
+                settings,
+                game,
+                root / "merged",
+                mkpfs,
+                log_path,
+                compression_workers,
+            )
+        LOG.info("stage 5/5: publishing output and cleaning temporary files")
+        return _publish_build_artifacts(
+            settings,
+            title_id,
+            game,
+            root,
+            output,
+            partial,
+            inner_image,
+            inner_partial,
+            version,
+            verification,
+            compression_workers,
+            compression_workers_mode,
+            dlc_artifacts,
+        )
+    except Exception:
+        _cleanup_staged_files(staged_build_paths)
+        raise
 
 
 def verify_artifact(settings: Settings, path: Path) -> dict[str, Any]:

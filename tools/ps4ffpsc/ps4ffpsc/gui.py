@@ -47,6 +47,7 @@ from .gui_model import (
     package_version_text,
     parse_progress_event,
     scan_inventory_path,
+    scan_exit_is_usable,
     source_cli_arguments,
     temporary_cli_arguments,
     validate_source,
@@ -68,10 +69,11 @@ from .runtime import (
     WINDOWS_JOB_ENVIRONMENT_VARIABLE,
     worker_executable,
 )
+from .util import path_is_within, paths_overlap
 
 
 APP_NAME = "PS4 FFPFSC"
-APP_VERSION = "0.2.6"
+APP_VERSION = "0.2.7"
 BUILD_STAGE_START = {1: 2.0, 2: 30.0, 3: 55.0, 4: 88.0, 5: 96.0}
 BUILD_STAGE_KEYS = {
     1: "stage_sources",
@@ -90,11 +92,12 @@ MKPFS_PHASE_KEYS = {
 }
 TEXTS = {
     "ru": {
-        "subtitle": "Подготовка проверенных образов для ShadowMountPlus — локально и без изменения исходных PKG",
+        "subtitle": "Подготовка проверенных образов для ShadowMountPlus — локально и без изменения исходных файлов",
         "about": "О программе",
-        "source_section": "1. Исходные пакеты",
+        "source_section": "1. Исходные PKG или распакованная игра",
         "choose_pkg": "Выбрать PKG-файлы…",
         "choose_folder": "Выбрать папку…",
+        "choose_dump": "Выбрать распакованную игру…",
         "clear": "Очистить",
         "scan": "Сканировать",
         "storage_section": "2. Папки хранения",
@@ -139,16 +142,18 @@ TEXTS = {
         "choose_pkg_title": "Выберите PS4 PKG",
         "pkg_filter": "PlayStation 4 PKG (*.pkg *.PKG);;Все файлы (*)",
         "choose_source_folder": "Выберите папку с PKG (подпапки будут просканированы)",
+        "choose_dump_folder": "Выберите корень распакованной игры или каталог с app/patch",
         "choose_output": "Куда сохранять готовые образы",
         "choose_temp": "Папка для временных файлов",
         "free_space": "свободно {gib:.1f} GiB",
         "directory_will_create": "каталог будет создан при сборке",
         "source_not_selected": "Источник не выбран",
-        "source_empty": "PKG-файлы или папка ещё не выбраны",
+        "source_empty": "PKG-файлы, папка с PKG или распакованная игра ещё не выбраны",
         "source_recursive": "будут просмотрены все подпапки",
+        "source_dump": "готовое дерево игры; исходные файлы останутся без изменений",
         "and_more": "… и ещё {count}",
         "stage_word": "этап",
-        "stage_sources": "проверка метаданных и извлечение PKG",
+        "stage_sources": "проверка источников и извлечение PKG при необходимости",
         "stage_merge": "объединение base и patch",
         "stage_compress": "сжатие FFPFSC",
         "stage_exfat": "создание exFAT без сжатия",
@@ -170,17 +175,17 @@ TEXTS = {
         "merge_status": "{title} · этап 2/5: объединение PKG {current}/{total}",
         "phase_status": "{title} · этап {stage}/5: {action} · {percent}%",
         "cleanup_status": "{title} · этап 5/5: очистка временных файлов",
-        "scan_none": "Сканирование: PKG не найдены",
-        "scan_progress": "Сканирование PKG: {current}/{total}",
+        "scan_none": "Сканирование: источники не найдены",
+        "scan_progress": "Сканирование источников: {current}/{total}",
         "scanning": "Сканирование…",
-        "scan_log": "Сканирование PKG и чтение метаданных…",
+        "scan_log": "Сканирование источников и чтение метаданных…",
         "source_missing_title": "Источник не выбран",
         "pkg_select_error": "Не удалось выбрать PKG",
         "no_buildable": "Нет игры, готовой к сборке.\n\n{details}",
         "select_buildable": "Отметьте хотя бы одну готовую к сборке игру.",
         "build_unavailable": "Сборка пока невозможна",
         "check_paths": "Проверьте пути",
-        "build_started": "Запущена сборка: {titles}. Исходные PKG не изменяются.",
+        "build_started": "Запущена сборка: {titles}. Исходные файлы не изменяются.",
         "build_preparing": "{title} · подготовка к сборке",
         "build_flow": "──── {title}: извлечение → объединение → {format} → проверка",
         "worker_missing": "Не найден рабочий модуль",
@@ -198,14 +203,14 @@ TEXTS = {
         "read_results_error": "Ошибка чтения результатов",
         "inventory_read_error": "Не удалось прочитать инвентарь",
         "scan_complete": "Сканирование завершено",
-        "found_log": "Найдено: PKG {packages}, игр {games}, готово к сборке {buildable}, неподдерживаемых {unsupported}.",
+        "found_log": "Найдено: источников {packages}, игр {games}, готово к сборке {buildable}, неподдерживаемых {unsupported}.",
         "patches_tooltip": "Будут применены патчи: {patches}",
         "none": "нет",
         "duplicate": "Дубликат: {path}",
         "unsupported": "Неподдерживаемые или зашифрованные PKG: {count}",
         "inventory_summary": "Игр: {games} · к сборке: {buildable} · выбрано ≈ {selected_size} · неподдерживаемых: {unsupported}",
         "approximate_size": "≈ {size}",
-        "size_tooltip": "Исходные PKG: {size} ({bytes} байт)",
+        "size_tooltip": "Размер выбранного источника: {size} ({bytes} байт)",
         "cancelled": "Отменено",
         "completed_errors": "Завершено с ошибками",
         "unknown_error": "неизвестная ошибка",
@@ -223,11 +228,12 @@ TEXTS = {
         "close_running": "Остановить текущую операцию и закрыть программу?",
     },
     "en": {
-        "subtitle": "Build verified ShadowMountPlus images locally without modifying source PKGs",
+        "subtitle": "Build verified ShadowMountPlus images locally without modifying source files",
         "about": "About",
-        "source_section": "1. Source packages",
+        "source_section": "1. Source PKGs or unpacked game",
         "choose_pkg": "Choose PKG files…",
         "choose_folder": "Choose folder…",
+        "choose_dump": "Choose unpacked game…",
         "clear": "Clear",
         "scan": "Scan",
         "storage_section": "2. Storage folders",
@@ -272,16 +278,18 @@ TEXTS = {
         "choose_pkg_title": "Select PS4 PKGs",
         "pkg_filter": "PlayStation 4 PKG (*.pkg *.PKG);;All files (*)",
         "choose_source_folder": "Select a PKG folder (subfolders will be scanned)",
+        "choose_dump_folder": "Select a flat unpacked game root or an app/patch directory",
         "choose_output": "Select the output folder",
         "choose_temp": "Select the temporary files folder",
         "free_space": "{gib:.1f} GiB free",
         "directory_will_create": "directory will be created during build",
         "source_not_selected": "Source not selected",
-        "source_empty": "No PKG files or folder selected",
+        "source_empty": "No PKGs, PKG folder, or unpacked game selected",
         "source_recursive": "all subfolders will be scanned",
+        "source_dump": "ready game tree; source files will remain unchanged",
         "and_more": "… and {count} more",
         "stage_word": "stage",
-        "stage_sources": "check metadata and extract PKGs",
+        "stage_sources": "check sources and extract PKGs when required",
         "stage_merge": "merge base and patches",
         "stage_compress": "compress FFPFSC",
         "stage_exfat": "create uncompressed exFAT",
@@ -303,17 +311,17 @@ TEXTS = {
         "merge_status": "{title} · stage 2/5: merge PKG {current}/{total}",
         "phase_status": "{title} · stage {stage}/5: {action} · {percent}%",
         "cleanup_status": "{title} · stage 5/5: clean temporary files",
-        "scan_none": "Scanning: no PKGs found",
-        "scan_progress": "Scanning PKGs: {current}/{total}",
+        "scan_none": "Scanning: no sources found",
+        "scan_progress": "Scanning sources: {current}/{total}",
         "scanning": "Scanning…",
-        "scan_log": "Scanning PKGs and reading metadata…",
+        "scan_log": "Scanning sources and reading metadata…",
         "source_missing_title": "Source not selected",
         "pkg_select_error": "Could not select PKG",
         "no_buildable": "No game is ready to build.\n\n{details}",
         "select_buildable": "Select at least one buildable game.",
         "build_unavailable": "Build is not available",
         "check_paths": "Check the selected paths",
-        "build_started": "Build started: {titles}. Source PKGs will not be modified.",
+        "build_started": "Build started: {titles}. Source files will not be modified.",
         "build_preparing": "{title} · preparing build",
         "build_flow": "──── {title}: extract → merge → {format} → verify",
         "worker_missing": "Worker module not found",
@@ -331,14 +339,14 @@ TEXTS = {
         "read_results_error": "Could not read results",
         "inventory_read_error": "Could not read inventory",
         "scan_complete": "Scanning completed",
-        "found_log": "Found: {packages} PKGs, {games} games, {buildable} buildable, {unsupported} unsupported.",
+        "found_log": "Found: {packages} sources, {games} games, {buildable} buildable, {unsupported} unsupported.",
         "patches_tooltip": "Patches to apply: {patches}",
         "none": "none",
         "duplicate": "Duplicate: {path}",
         "unsupported": "Unsupported or encrypted PKGs: {count}",
         "inventory_summary": "Games: {games} · buildable: {buildable} · selected ≈ {selected_size} · unsupported: {unsupported}",
         "approximate_size": "≈ {size}",
-        "size_tooltip": "Source PKGs: {size} ({bytes} bytes)",
+        "size_tooltip": "Selected source size: {size} ({bytes} bytes)",
         "cancelled": "Cancelled",
         "completed_errors": "Completed with errors",
         "unknown_error": "unknown error",
@@ -579,17 +587,19 @@ class MainWindow(QMainWindow):
 
         source_title = self._bind_text(QLabel(), "source_section")
         source_title.setObjectName("sectionTitle")
-        source_layout.addWidget(source_title, 0, 0, 1, 4)
+        source_layout.addWidget(source_title, 0, 0, 1, 5)
         self.source_label = QLabel()
         self.source_label.setObjectName("pathLabel")
         self.source_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.source_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        source_layout.addWidget(self.source_label, 1, 0, 1, 4)
+        source_layout.addWidget(self.source_label, 1, 0, 1, 5)
 
         choose_files = self._bind_text(QPushButton(), "choose_pkg")
         choose_files.clicked.connect(self._choose_files)
         choose_folder = self._bind_text(QPushButton(), "choose_folder")
         choose_folder.clicked.connect(self._choose_folder)
+        choose_dump = self._bind_text(QPushButton(), "choose_dump")
+        choose_dump.clicked.connect(self._choose_dump)
         clear_source = self._bind_text(QPushButton(), "clear")
         clear_source.setObjectName("quietButton")
         clear_source.clicked.connect(self._clear_source)
@@ -598,38 +608,39 @@ class MainWindow(QMainWindow):
         self.scan_button.clicked.connect(self._start_scan)
         source_layout.addWidget(choose_files, 2, 0)
         source_layout.addWidget(choose_folder, 2, 1)
-        source_layout.addWidget(clear_source, 2, 2)
-        source_layout.addWidget(self.scan_button, 2, 3)
+        source_layout.addWidget(choose_dump, 2, 2)
+        source_layout.addWidget(clear_source, 2, 3)
+        source_layout.addWidget(self.scan_button, 2, 4)
 
         output_title = self._bind_text(QLabel(), "storage_section")
         output_title.setObjectName("sectionTitle")
-        source_layout.addWidget(output_title, 3, 0, 1, 4)
+        source_layout.addWidget(output_title, 3, 0, 1, 5)
         output_files_label = self._bind_text(QLabel(), "output_files")
-        source_layout.addWidget(output_files_label, 4, 0, 1, 4)
+        source_layout.addWidget(output_files_label, 4, 0, 1, 5)
         self.output_label = QLabel()
         self.output_label.setObjectName("pathLabel")
         self.output_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        source_layout.addWidget(self.output_label, 5, 0, 1, 3)
+        source_layout.addWidget(self.output_label, 5, 0, 1, 4)
         output_button = self._bind_text(QPushButton(), "choose_folder")
         output_button.clicked.connect(self._choose_output)
-        source_layout.addWidget(output_button, 5, 3)
+        source_layout.addWidget(output_button, 5, 4)
         temp_files_label = self._bind_text(
             QLabel(),
             "temp_files_windows" if sys.platform == "win32" else "temp_files",
         )
-        source_layout.addWidget(temp_files_label, 6, 0, 1, 4)
+        source_layout.addWidget(temp_files_label, 6, 0, 1, 5)
         self.temp_label = QLabel()
         self.temp_label.setObjectName("pathLabel")
         self.temp_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        source_layout.addWidget(self.temp_label, 7, 0, 1, 2)
+        source_layout.addWidget(self.temp_label, 7, 0, 1, 3)
         reset_temp = self._bind_text(QPushButton(), "reset_tmp")
         reset_temp.setObjectName("quietButton")
         reset_temp.clicked.connect(self._reset_temp)
-        source_layout.addWidget(reset_temp, 7, 2)
+        source_layout.addWidget(reset_temp, 7, 3)
         temp_button = self._bind_text(QPushButton(), "choose_folder")
         temp_button.clicked.connect(self._choose_temp)
-        source_layout.addWidget(temp_button, 7, 3)
-        source_layout.setColumnStretch(2, 1)
+        source_layout.addWidget(temp_button, 7, 4)
+        source_layout.setColumnStretch(3, 1)
         page.addWidget(self.source_card)
 
         splitter = QSplitter(Qt.Orientation.Vertical)
@@ -868,7 +879,14 @@ class MainWindow(QMainWindow):
             self.settings.setValue("temp_dir", str(self.temp_dir))
         folder = self.settings.value("source_folder", "", type=str)
         if folder and Path(folder).is_dir():
-            self.source_mode = "folder"
+            stored_source_mode = self.settings.value(
+                "source_mode", "folder", type=str
+            )
+            self.source_mode = (
+                stored_source_mode
+                if stored_source_mode in {"folder", "dump"}
+                else "folder"
+            )
             self.source_folder = Path(folder)
         stored_output_format = self.settings.value(
             "output_format",
@@ -918,6 +936,7 @@ class MainWindow(QMainWindow):
         self.settings.setValue(
             "source_folder", str(self.source_folder) if self.source_folder else ""
         )
+        self.settings.setValue("source_mode", self.source_mode)
         self.settings.setValue(
             "compression_level",
             int(self.compression_combo.currentData()),
@@ -994,6 +1013,26 @@ class MainWindow(QMainWindow):
         self._update_controls()
         self._save_settings()
 
+    def _choose_dump(self) -> None:
+        start = str(self.source_folder or self.root)
+        name = QFileDialog.getExistingDirectory(
+            self,
+            self._t("choose_dump_folder"),
+            start,
+            QFileDialog.Option.ShowDirsOnly,
+        )
+        if not name:
+            return
+        self.source_mode = "dump"
+        self.source_folder = Path(name).resolve()
+        self.pkg_files = ()
+        self.inventory = None
+        self.games_tree.clear()
+        self._set_summary("summary_initial")
+        self._update_source_label()
+        self._update_controls()
+        self._save_settings()
+
     def _choose_output(self) -> None:
         name = QFileDialog.getExistingDirectory(
             self,
@@ -1047,6 +1086,7 @@ class MainWindow(QMainWindow):
     def _clear_source(self) -> None:
         self.pkg_files = ()
         self.source_folder = None
+        self.source_mode = "folder"
         self.inventory = None
         self.games_tree.clear()
         self._set_summary("source_not_selected")
@@ -1062,6 +1102,11 @@ class MainWindow(QMainWindow):
                 )
             self.source_label.setText(f"{len(self.pkg_files)} PKG: {preview}")
             self.source_label.setToolTip("\n".join(str(path) for path in self.pkg_files))
+        elif self.source_folder and self.source_mode == "dump":
+            self.source_label.setText(
+                f"{self.source_folder}  ·  {self._t('source_dump')}"
+            )
+            self.source_label.setToolTip(str(self.source_folder))
         elif self.source_folder:
             self.source_label.setText(
                 f"{self.source_folder}  ·  {self._t('source_recursive')}"
@@ -1408,14 +1453,22 @@ class MainWindow(QMainWindow):
         for index in range(self.games_tree.topLevelItemCount()):
             item = self.games_tree.topLevelItem(index)
             title_id = item.data(0, Qt.ItemDataRole.UserRole)
-            if (
-                title_id
-                and item.checkState(0) != Qt.CheckState.Unchecked
-            ):
+            if self.source_mode == "dump":
+                is_selected = item.checkState(0) == Qt.CheckState.Checked
+                package_paths: tuple[Path, ...] = ()
+            else:
                 package_paths = self._checked_package_paths(item)
-                if package_paths:
-                    title_text = str(title_id)
-                    selected.append(title_text)
+                is_selected = bool(package_paths)
+            if title_id and is_selected:
+                # A directory-wide scan can mark a title as conflicted while a
+                # user-selected subset (for example, base plus one of two
+                # same-version patches) is valid.  For PKG sources the worker
+                # rescans exactly these checked files.  An unpacked-tree source
+                # is one indivisible game container, so its top-row selection
+                # is authoritative and no child files are selected here.
+                title_text = str(title_id)
+                selected.append(title_text)
+                if self.source_mode != "dump":
                     selected_packages[title_text] = package_paths
         if not selected:
             blocked: list[str] = []
@@ -1433,6 +1486,19 @@ class MainWindow(QMainWindow):
             self._show_error(self._t("build_unavailable"), detail)
             return
         try:
+            if self.source_mode == "dump" and self.source_folder is not None:
+                source = self.source_folder.expanduser().resolve(strict=False)
+                workspace = temporary_workspace(self.temp_dir)
+                if paths_overlap(source, workspace):
+                    raise ValueError(
+                        "unpacked game source overlaps the temporary workspace; "
+                        "choose a different temporary directory"
+                    )
+                if path_is_within(self.output_dir, source):
+                    raise ValueError(
+                        "output directory must not be inside the selected "
+                        "unpacked game source"
+                    )
             self.output_dir.mkdir(parents=True, exist_ok=True)
             workspace = temporary_workspace(self.temp_dir)
             workspace.mkdir(parents=True, exist_ok=True)
@@ -1443,7 +1509,7 @@ class MainWindow(QMainWindow):
             ):
                 pass
             self._source_arguments()
-        except OSError as error:
+        except (OSError, ValueError) as error:
             self._show_error(self._t("check_paths"), str(error))
             return
         self.build_queue = selected
@@ -1477,11 +1543,15 @@ class MainWindow(QMainWindow):
             )
         )
         package_paths = self.selected_packages_by_title.get(title_id, ())
-        source_arguments = source_cli_arguments(
-            "files",
-            package_paths,
-            None,
-            self.language,
+        source_arguments = (
+            self._source_arguments()
+            if self.source_mode == "dump"
+            else source_cli_arguments(
+                "files",
+                package_paths,
+                None,
+                self.language,
+            )
         )
         self._start_process(
             f"build:{title_id}",
@@ -1608,7 +1678,7 @@ class MainWindow(QMainWindow):
             if self.cancel_requested:
                 self._finish_progress(False)
                 self._set_stage("cancelled")
-            elif exit_code in (0, 3):
+            elif scan_exit_is_usable(exit_code):
                 self._finish_scan(payload)
             else:
                 self._finish_progress(False)
@@ -1755,11 +1825,10 @@ class MainWindow(QMainWindow):
                 top.setToolTip(2, reason)
                 top.setText(2, f"{top.text(2)}  —  {reason}")
             else:
-                top.setFlags(
-                    top.flags()
-                    | Qt.ItemFlag.ItemIsUserCheckable
-                    | Qt.ItemFlag.ItemIsAutoTristate
-                )
+                top_flags = top.flags() | Qt.ItemFlag.ItemIsUserCheckable
+                if self.source_mode != "dump":
+                    top_flags |= Qt.ItemFlag.ItemIsAutoTristate
+                top.setFlags(top_flags)
                 top.setToolTip(
                     2,
                     self._t(
@@ -1777,10 +1846,20 @@ class MainWindow(QMainWindow):
             )
             for key, label in groups:
                 for package in game.get(key, []):
+                    source_kind = str(package.get("source_kind") or "pkg")
+                    item_label = (
+                        "TREE"
+                        if source_kind == "dump_tree" and key == "base"
+                        else "PATCH TREE"
+                        if source_kind == "dump_tree" and key == "patches"
+                        else "BACKPORT"
+                        if package.get("patch_role") == "additional_layer"
+                        else label
+                    )
                     child = QTreeWidgetItem(
                         [
                             "",
-                            label,
+                            item_label,
                             Path(package.get("path", "")).name,
                             package_version_text(package),
                             "",
@@ -1795,24 +1874,29 @@ class MainWindow(QMainWindow):
                         Qt.ItemDataRole.UserRole,
                         package_path,
                     )
-                    child.setFlags(
-                        child.flags() | Qt.ItemFlag.ItemIsUserCheckable
-                    )
-                    checked_by_default = not bool(package.get("duplicate_of"))
-                    is_checked = (
-                        package_check_state.get(
-                            package_path,
-                            checked_by_default,
+                    if self.source_mode != "dump":
+                        child.setFlags(
+                            child.flags() | Qt.ItemFlag.ItemIsUserCheckable
                         )
-                        if package_check_state is not None
-                        else checked_by_default
-                    )
-                    child.setCheckState(
-                        0,
-                        Qt.CheckState.Checked
-                        if is_checked
-                        else Qt.CheckState.Unchecked,
-                    )
+                        checked_by_default = not bool(package.get("duplicate_of"))
+                        is_checked = (
+                            package_check_state.get(
+                                package_path,
+                                checked_by_default,
+                            )
+                            if package_check_state is not None
+                            else checked_by_default
+                        )
+                        child.setCheckState(
+                            0,
+                            Qt.CheckState.Checked
+                            if is_checked
+                            else Qt.CheckState.Unchecked,
+                        )
+                    else:
+                        child.setFlags(
+                            child.flags() & ~Qt.ItemFlag.ItemIsUserCheckable
+                        )
                     child.setToolTip(
                         6,
                         self._t(
@@ -1880,23 +1964,30 @@ class MainWindow(QMainWindow):
         for index in range(self.games_tree.topLevelItemCount()):
             item = self.games_tree.topLevelItem(index)
             title_id = item.data(0, Qt.ItemDataRole.UserRole)
-            if title_id and item.checkState(0) != Qt.CheckState.Unchecked:
-                selected_paths = {
-                    str(path.resolve())
-                    for path in self._checked_package_paths(item)
-                }
-                game = self.inventory.get("games", {}).get(str(title_id), {})
-                for package in [
-                    *game.get("base", []),
-                    *game.get("patches", []),
-                    *game.get("dlc", []),
-                    *game.get("unknown", []),
-                ]:
-                    if str(Path(package.get("path", "")).resolve()) in selected_paths:
-                        selected_size += max(
-                            0,
-                            int(package.get("size", 0) or 0),
-                        )
+            if not title_id:
+                continue
+            game = self.inventory.get("games", {}).get(str(title_id), {})
+            if self.source_mode == "dump":
+                if item.checkState(0) == Qt.CheckState.Checked:
+                    selected_size += game_source_size(game)
+                continue
+            selected_paths = {
+                str(path.resolve())
+                for path in self._checked_package_paths(item)
+            }
+            if not selected_paths:
+                continue
+            for package in [
+                *game.get("base", []),
+                *game.get("patches", []),
+                *game.get("dlc", []),
+                *game.get("unknown", []),
+            ]:
+                if str(Path(package.get("path", "")).resolve()) in selected_paths:
+                    selected_size += max(
+                        0,
+                        int(package.get("size", 0) or 0),
+                    )
         summary = inventory_summary(self.inventory)
         self._set_summary(
             "inventory_summary",
@@ -1982,14 +2073,22 @@ class MainWindow(QMainWindow):
     def _has_checked_game(self) -> bool:
         return any(
             self.games_tree.topLevelItem(index).data(0, Qt.ItemDataRole.UserRole)
-            and self.games_tree.topLevelItem(index).checkState(0)
-            != Qt.CheckState.Unchecked
+            and (
+                self.games_tree.topLevelItem(index).checkState(0)
+                == Qt.CheckState.Checked
+                if self.source_mode == "dump"
+                else self._checked_package_paths(self.games_tree.topLevelItem(index))
+            )
             for index in range(self.games_tree.topLevelItemCount())
         )
 
     def _update_controls(self) -> None:
         running = self.process.state() != QProcess.ProcessState.NotRunning
-        has_source = bool(self.pkg_files) if self.source_mode == "files" else bool(self.source_folder)
+        has_source = (
+            bool(self.pkg_files)
+            if self.source_mode == "files"
+            else bool(self.source_folder)
+        )
         self.source_card.setEnabled(not running)
         self.scan_button.setEnabled(has_source and not running)
         has_checked = self._has_checked_game()

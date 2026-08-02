@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable
 
-from .inventory import inspect_package
+from .inventory import inspect_package, ordered_patches
 from .pipeline import (
     Settings,
     build_game,
@@ -45,6 +45,15 @@ def _common(parser: argparse.ArgumentParser) -> None:
         action="append",
         default=[],
         help="inspect this PKG; repeat to select multiple files (overrides --pkg-dir scanning)",
+    )
+    parser.add_argument(
+        "--dump-dir",
+        action="append",
+        default=[],
+        help=(
+            "use an already unpacked game tree; accepts a flat game root or an "
+            "app/patch directory produced by a game dumper"
+        ),
     )
     parser.add_argument("--unpacked-dir")
     parser.add_argument("--output-dir")
@@ -92,7 +101,10 @@ def _common(parser: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ps4ffpsc",
-        description="Convert shadPS4-supported, legally owned PS4 PKGs to verified FFPFSC artifacts.",
+        description=(
+            "Convert supported, legally owned PS4 PKGs or an unpacked game tree "
+            "to verified FFPFSC/exFAT artifacts."
+        ),
     )
     sub = parser.add_subparsers(dest="command")
     for name, help_text in [
@@ -155,7 +167,7 @@ def _print_list(inventory: dict[str, Any], json_output: bool) -> None:
         state = "buildable" if game["buildable"] else "blocked"
         print(f"{title_id}  {game['title']}  [{state}]")
         print(f"  base={len(game['base'])} patches={len(game['patches'])} dlc={len(game['dlc'])}")
-        for patch in sorted(game["patches"], key=lambda item: item.get("app_version", "")):
+        for patch in ordered_patches(game):
             print(f"  patch {patch.get('app_version')}: {Path(patch['path']).name}")
         for item in game["dlc"]:
             print(f"  DLC {item.get('entitlement_label')}: {Path(item['path']).name}")
@@ -214,7 +226,7 @@ def main(argv: list[str] | None = None) -> int:
             _print_list(inventory, settings.json_output)
             return EXIT_CONFLICT if any(game["conflicts"] for game in inventory["games"].values()) else 0
         if args.command == "unpack":
-            inventory = load_or_scan(settings)
+            inventory = load_or_scan(settings, refresh=True)
             title_ids = (
                 sorted(inventory["games"])
                 if args.all
@@ -235,7 +247,7 @@ def main(argv: list[str] | None = None) -> int:
             _emit(results, settings.json_output)
             return EXIT_GENERAL if failed else 0
         if args.command == "merge":
-            inventory = load_or_scan(settings)
+            inventory = load_or_scan(settings, refresh=True)
             result = merge_game(settings, inventory, args.title_id)
             _emit(result, settings.json_output)
             return 0

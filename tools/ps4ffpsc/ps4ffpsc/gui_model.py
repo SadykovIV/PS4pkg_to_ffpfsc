@@ -8,8 +8,11 @@ from typing import Any, Iterable
 from .runtime import temporary_workspace
 
 PROGRESS_PREFIX = "PS4FFPSC_PROGRESS "
-_SCAN_TOTAL_RE = re.compile(r"\bscanning (\d+) PKG file\(s\)")
-_SCAN_ITEM_RE = re.compile(r"\binspecting PKG:")
+USABLE_SCAN_EXIT_CODES = frozenset({0, 3})
+_SCAN_TOTAL_RE = re.compile(
+    r"\bscanning (\d+) (?:PKG file\(s\)|unpacked game source\(s\))"
+)
+_SCAN_ITEM_RE = re.compile(r"\binspecting (?:PKG|unpacked game source):")
 _BUILD_STAGE_RE = re.compile(r"\bstage (\d+)/(\d+):")
 
 
@@ -64,6 +67,17 @@ def validate_source(
         if not path.is_dir():
             raise NotADirectoryError(path)
         return mode, (), path
+    if mode == "dump":
+        if folder is None or not str(folder).strip():
+            raise ValueError(
+                "unpacked game folder is not selected"
+                if language == "en"
+                else "не выбрана папка с распакованной игрой"
+            )
+        path = Path(folder).expanduser().resolve()
+        if not path.is_dir():
+            raise NotADirectoryError(path)
+        return mode, (), path
     raise ValueError(
         f"unknown source mode: {mode}"
         if language == "en"
@@ -82,6 +96,8 @@ def source_cli_arguments(
     )
     if normalized_mode == "folder":
         return ["--pkg-dir", str(normalized_folder)]
+    if normalized_mode == "dump":
+        return ["--dump-dir", str(normalized_folder)]
     arguments: list[str] = []
     for path in normalized_files:
         arguments.extend(["--pkg-file", str(path)])
@@ -106,6 +122,11 @@ def scan_inventory_path(payload: Any, temp_dir: str | Path) -> Path:
         if isinstance(reported, str) and reported.strip():
             return Path(reported)
     return temporary_workspace(Path(temp_dir)) / "unpacked" / "package_inventory.json"
+
+
+def scan_exit_is_usable(exit_code: int) -> bool:
+    """Exit 3 means unsupported inputs were reported, not that scan data is unusable."""
+    return exit_code in USABLE_SCAN_EXIT_CODES
 
 
 def parse_progress_event(line: str) -> dict[str, Any] | None:
@@ -240,6 +261,12 @@ def game_block_reason(game: dict[str, Any], language: str = "ru") -> str:
                 "one or more PKG types were not recognized"
                 if language == "en"
                 else "тип одного или нескольких PKG не распознан"
+            )
+        elif reason == "invalid_patch_app_version":
+            translated.append(
+                "a patch has a missing or invalid APP_VER"
+                if language == "en"
+                else "у одного из patch отсутствует или некорректен APP_VER"
             )
         elif reason.startswith("conflicting_patch_version:"):
             translated.append(

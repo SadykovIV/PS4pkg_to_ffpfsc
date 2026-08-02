@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-import subprocess
+import struct
 import tempfile
 from pathlib import Path
 
@@ -47,6 +47,15 @@ def render(path: Path, pixels: int) -> None:
         raise RuntimeError(f"could not save {path}")
 
 
+def write_icns(output: Path, images: list[tuple[bytes, Path]]) -> None:
+    chunks: list[bytes] = []
+    for icon_type, image_path in images:
+        image = image_path.read_bytes()
+        chunks.append(icon_type + struct.pack(">I", 8 + len(image)) + image)
+    body = b"".join(chunks)
+    output.write_bytes(b"icns" + struct.pack(">I", 8 + len(body)) + body)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("output", type=Path)
@@ -54,26 +63,25 @@ def main() -> int:
     QGuiApplication([])
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="ps4ffpsc-icon-") as temporary:
-        iconset = Path(temporary) / "AppIcon.iconset"
-        iconset.mkdir()
+        icon_root = Path(temporary)
         variants = [
-            (16, "icon_16x16.png"),
-            (32, "icon_16x16@2x.png"),
-            (32, "icon_32x32.png"),
-            (64, "icon_32x32@2x.png"),
-            (128, "icon_128x128.png"),
-            (256, "icon_128x128@2x.png"),
-            (256, "icon_256x256.png"),
-            (512, "icon_256x256@2x.png"),
-            (512, "icon_512x512.png"),
-            (1024, "icon_512x512@2x.png"),
+            (16, b"icp4"),
+            (32, b"ic11"),
+            (32, b"icp5"),
+            (64, b"ic12"),
+            (128, b"ic07"),
+            (256, b"ic13"),
+            (256, b"ic08"),
+            (512, b"ic14"),
+            (512, b"ic09"),
+            (1024, b"ic10"),
         ]
-        for pixels, name in variants:
-            render(iconset / name, pixels)
-        subprocess.run(
-            ["iconutil", "-c", "icns", str(iconset), "-o", str(args.output)],
-            check=True,
-        )
+        images: list[tuple[bytes, Path]] = []
+        for pixels, icon_type in variants:
+            image_path = icon_root / f"{icon_type.decode('ascii')}-{pixels}.png"
+            render(image_path, pixels)
+            images.append((icon_type, image_path))
+        write_icns(args.output, images)
     return 0
 
 

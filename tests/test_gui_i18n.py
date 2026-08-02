@@ -189,6 +189,305 @@ def test_inventory_shows_pkg_and_game_sizes_and_byte_based_extraction_eta(
     settings.clear()
 
 
+def test_unchecked_unsupported_pkg_does_not_block_selected_supported_game(
+    tmp_path: Path,
+) -> None:
+    app = QApplication.instance() or QApplication([])
+    app.setApplicationName("PS4 FFPFSC unsupported selection test")
+    app.setOrganizationName("ps4ffpsc-tests")
+    settings = QSettings()
+    settings.clear()
+    base_path = tmp_path / "base.pkg"
+    unsupported_path = tmp_path / "encrypted.pkg"
+    base_path.write_bytes(b"base")
+    unsupported_path.write_bytes(b"unsupported")
+    base = {
+        "path": str(base_path),
+        "size": base_path.stat().st_size,
+        "supported": True,
+        "kind": "base",
+        "app_version": "01.00",
+    }
+    unsupported = {
+        "path": str(unsupported_path),
+        "size": unsupported_path.stat().st_size,
+        "supported": False,
+        "reason": "encrypted",
+    }
+    window = MainWindow(tmp_path / "data", Path(__file__).resolve().parents[1])
+    window.source_mode = "files"
+    window.pkg_files = (base_path, unsupported_path)
+    window.output_dir = tmp_path / "output"
+    window.inventory = {
+        "packages": [base, unsupported],
+        "unsupported": [unsupported],
+        "games": {
+            "CUSA12345": {
+                "title": "Supported game",
+                "base": [base],
+                "patches": [],
+                "dlc": [],
+                "unknown": [],
+                "buildable": True,
+                "conflicts": [],
+                "warnings": [],
+            }
+        },
+    }
+    window._populate_inventory()
+    started: list[bool] = []
+    window._start_next_build = lambda: started.append(True)
+
+    window._start_build()
+
+    assert started == [True]
+    assert window.build_queue == ["CUSA12345"]
+    assert window.selected_packages_by_title == {
+        "CUSA12345": (base_path,)
+    }
+    unsupported_group = window.games_tree.topLevelItem(1)
+    assert unsupported_group.data(0, Qt.ItemDataRole.UserRole) is None
+    window.close()
+    settings.clear()
+
+
+def test_dump_tree_uses_one_game_checkbox_and_builds_whole_selected_container(
+    tmp_path: Path,
+) -> None:
+    app = QApplication.instance() or QApplication([])
+    app.setApplicationName("PS4 FFPFSC unpacked tree selection test")
+    app.setOrganizationName("ps4ffpsc-tests")
+    settings = QSettings()
+    settings.clear()
+    settings.setValue("language", "ru")
+    dump_root = tmp_path / "dump"
+    base_tree = dump_root / "app"
+    patch_tree = dump_root / "patch"
+    dlc_tree = dump_root / "addcont" / "CUSA12345_00-DLC000000000001"
+    for source_tree in (base_tree, patch_tree, dlc_tree):
+        source_tree.mkdir(parents=True)
+    base = {
+        "path": str(base_tree),
+        "size": 120,
+        "source_kind": "dump_tree",
+        "kind": "base",
+        "app_version": "01.00",
+    }
+    patch = {
+        "path": str(patch_tree),
+        "size": 40,
+        "source_kind": "dump_tree",
+        "kind": "patch",
+        "app_version": "01.03",
+    }
+    dlc = {
+        "path": str(dlc_tree),
+        "size": 15,
+        "source_kind": "dump_tree",
+        "kind": "dlc",
+    }
+    window = MainWindow(tmp_path / "data", Path(__file__).resolve().parents[1])
+    window.source_mode = "dump"
+    window.source_folder = dump_root
+    window.output_dir = tmp_path / "output"
+    window.temp_dir = tmp_path / "temporary"
+    window.inventory = {
+        "packages": [base, patch, dlc],
+        "unsupported": [],
+        "games": {
+            "CUSA12345": {
+                "title": "Unpacked game",
+                "base": [base],
+                "patches": [patch],
+                "dlc": [dlc],
+                "unknown": [],
+                "buildable": True,
+                "conflicts": [],
+                "warnings": [],
+            }
+        },
+    }
+    window._populate_inventory()
+
+    top = window.games_tree.topLevelItem(0)
+    assert top.flags() & Qt.ItemFlag.ItemIsUserCheckable
+    assert not top.flags() & Qt.ItemFlag.ItemIsAutoTristate
+    assert top.checkState(0) == Qt.CheckState.Checked
+    assert top.childCount() == 3
+    assert [top.child(index).text(1) for index in range(top.childCount())] == [
+        "TREE",
+        "PATCH TREE",
+        "DLC",
+    ]
+    assert all(
+        not top.child(index).flags() & Qt.ItemFlag.ItemIsUserCheckable
+        for index in range(top.childCount())
+    )
+    assert window._checked_package_paths(top) == ()
+    assert window._has_checked_game()
+    assert "выбрано ≈ 175 B" in window.summary_label.text()
+
+    top.setCheckState(0, Qt.CheckState.Unchecked)
+    assert not window._has_checked_game()
+    assert "выбрано ≈ 0 B" in window.summary_label.text()
+    top.setCheckState(0, Qt.CheckState.Checked)
+
+    started: list[tuple[str, list[str]]] = []
+    window._start_process = lambda operation, arguments: started.append(
+        (operation, arguments)
+    )
+    window._start_build()
+
+    assert started and started[0][0] == "build:CUSA12345"
+    command = started[0][1]
+    assert "--dump-dir" in command
+    assert command[command.index("--dump-dir") + 1] == str(dump_root.resolve())
+    assert "--pkg-file" not in command
+    assert window.selected_packages_by_title == {}
+    window.progress_timer.stop()
+    window.close()
+    settings.clear()
+
+
+def test_dump_gui_rejects_output_inside_source_before_creating_it(
+    tmp_path: Path,
+) -> None:
+    app = QApplication.instance() or QApplication([])
+    app.setApplicationName("PS4 FFPFSC unpacked tree boundary test")
+    app.setOrganizationName("ps4ffpsc-tests")
+    settings = QSettings()
+    settings.clear()
+    dump_root = tmp_path / "dump"
+    game_tree = dump_root / "app"
+    game_tree.mkdir(parents=True)
+    output_inside_source = dump_root / "generated-output"
+    base = {
+        "path": str(game_tree),
+        "size": 120,
+        "source_kind": "dump_tree",
+        "kind": "base",
+        "app_version": "01.00",
+    }
+    window = MainWindow(tmp_path / "data", Path(__file__).resolve().parents[1])
+    window.source_mode = "dump"
+    window.source_folder = dump_root
+    window.output_dir = output_inside_source
+    window.temp_dir = tmp_path / "temporary"
+    window.inventory = {
+        "packages": [base],
+        "unsupported": [],
+        "games": {
+            "CUSA12345": {
+                "title": "Unpacked game",
+                "base": [base],
+                "patches": [],
+                "dlc": [],
+                "unknown": [],
+                "buildable": True,
+                "conflicts": [],
+                "warnings": [],
+            }
+        },
+    }
+    window._populate_inventory()
+    errors: list[tuple[str, str]] = []
+    window._show_error = lambda title, detail: errors.append((title, detail))
+    started: list[bool] = []
+    window._start_next_build = lambda: started.append(True)
+
+    window._start_build()
+
+    assert started == []
+    assert errors and "must not be inside" in errors[0][1]
+    assert not output_inside_source.exists()
+    window.close()
+    settings.clear()
+
+
+def test_conflicting_patch_can_be_deselected_before_gui_build(
+    tmp_path: Path,
+) -> None:
+    app = QApplication.instance() or QApplication([])
+    app.setApplicationName("PS4 FFPFSC conflict selection test")
+    app.setOrganizationName("ps4ffpsc-tests")
+    settings = QSettings()
+    settings.clear()
+    base_path = tmp_path / "base.pkg"
+    first_patch_path = tmp_path / "patch-a.pkg"
+    second_patch_path = tmp_path / "patch-b.pkg"
+    for path in (base_path, first_patch_path, second_patch_path):
+        path.write_bytes(b"pkg")
+    base = {
+        "path": str(base_path),
+        "size": base_path.stat().st_size,
+        "supported": True,
+        "kind": "base",
+        "app_version": "01.00",
+    }
+    first_patch = {
+        "path": str(first_patch_path),
+        "size": first_patch_path.stat().st_size,
+        "supported": True,
+        "kind": "patch",
+        "app_version": "01.10",
+    }
+    second_patch = {
+        "path": str(second_patch_path),
+        "size": second_patch_path.stat().st_size,
+        "supported": True,
+        "kind": "patch",
+        "app_version": "01.10",
+    }
+    window = MainWindow(tmp_path / "data", Path(__file__).resolve().parents[1])
+    window.source_mode = "files"
+    window.pkg_files = (base_path, first_patch_path, second_patch_path)
+    window.output_dir = tmp_path / "output"
+    window.temp_dir = tmp_path / "temporary"
+    window.inventory = {
+        "packages": [base, first_patch, second_patch],
+        "unsupported": [],
+        "games": {
+            "CUSA12345": {
+                "title": "Conflicting game",
+                "base": [base],
+                "patches": [first_patch, second_patch],
+                "dlc": [],
+                "unknown": [],
+                "buildable": False,
+                "conflicts": ["conflicting_patch_version:01.10"],
+                "warnings": [],
+            }
+        },
+    }
+    window._populate_inventory()
+    top = window.games_tree.topLevelItem(0)
+    assert top.checkState(0) == Qt.CheckState.Unchecked
+    assert top.child(2).flags() & Qt.ItemFlag.ItemIsUserCheckable
+
+    top.child(2).setCheckState(0, Qt.CheckState.Unchecked)
+    started: list[tuple[str, list[str]]] = []
+    window._start_process = lambda operation, arguments: started.append(
+        (operation, arguments)
+    )
+
+    window._start_build()
+
+    assert window.selected_packages_by_title == {
+        "CUSA12345": (base_path, first_patch_path)
+    }
+    assert started and started[0][0] == "build:CUSA12345"
+    command = started[0][1]
+    selected_paths = [
+        command[index + 1]
+        for index, argument in enumerate(command[:-1])
+        if argument == "--pkg-file"
+    ]
+    assert selected_paths == [str(base_path), str(first_patch_path)]
+    window.progress_timer.stop()
+    window.close()
+    settings.clear()
+
+
 def test_output_format_and_compression_are_selectable_persistent_and_passed_to_worker(
     tmp_path: Path,
 ) -> None:

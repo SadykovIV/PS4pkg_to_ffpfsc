@@ -113,7 +113,12 @@ def choose_title(values: dict[str, Any], preferred_index: int | None = None) -> 
         preferred = values.get(f"TITLE_{preferred_index:02d}")
         if isinstance(preferred, str) and preferred.strip():
             return preferred.strip()
+    english_title = values.get("TITLE_01")
+    if isinstance(english_title, str) and english_title.strip():
+        return english_title.strip()
     for index in range(30):
+        if index == 1:
+            continue
         title = values.get(f"TITLE_{index:02d}")
         if isinstance(title, str) and title.strip():
             return title.strip()
@@ -128,6 +133,7 @@ def build_param_json(
     title_id: str,
     title_name: str,
     existing_data: bytes | None = None,
+    sfo_values: dict[str, Any] | None = None,
 ) -> bytes:
     payload: dict[str, Any] = {}
     if existing_data is not None and not existing_data.startswith(b"\xef\xbb\xbf"):
@@ -150,6 +156,16 @@ def build_param_json(
     payload["localizedParameters"] = localized
     payload["titleId"] = title_id
     payload["titleName"] = title_name
+    # Native PS4 appmeta JSON normally remains minimal and the game reads
+    # USER_DEFINED_PARAM_* from param.sfo. Some image-launched games, however,
+    # have been observed to lose their language/region selector unless the
+    # non-zero value is also exposed through the camelCase JSON projection.
+    # Mirror only explicit non-zero integers; param.sfo remains authoritative.
+    if sfo_values is not None:
+        for index in range(1, 5):
+            value = sfo_values.get(f"USER_DEFINED_PARAM_{index}")
+            if isinstance(value, int) and value != 0:
+                payload[f"userDefinedParam{index}"] = value
     return (json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
 
 

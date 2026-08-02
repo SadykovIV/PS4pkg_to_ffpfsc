@@ -11,10 +11,12 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <cryptopp/sha.h>
 
+#include "common/utf8_path.h"
 #include "core/file_format/pkg.h"
 #include "core/file_format/psf.h"
 
@@ -305,7 +307,7 @@ static bool Inspect(const fs::path& path, Inspection& result, std::string& reaso
 }
 
 static void PrintFailure(const fs::path& path, std::string_view reason) {
-    std::cout << "{\"path\":\"" << JsonEscape(path.string())
+    std::cout << "{\"path\":\"" << JsonEscape(PS4FFPSC::PathToUtf8(path))
               << "\",\"supported\":false,\"error\":\"unsupported_or_encrypted_pkg\","
                  "\"reason\":\""
               << JsonEscape(reason) << "\"}\n";
@@ -313,7 +315,8 @@ static void PrintFailure(const fs::path& path, std::string_view reason) {
 
 static void PrintInspection(const fs::path& path, const Inspection& item) {
     const auto header = item.pkg.GetPkgHeader();
-    std::cout << "{\"path\":\"" << JsonEscape(path.string()) << "\",\"sha256\":";
+    std::cout << "{\"path\":\"" << JsonEscape(PS4FFPSC::PathToUtf8(path))
+              << "\",\"sha256\":";
     if (item.sha256.empty()) {
         std::cout << "null";
     } else {
@@ -476,30 +479,57 @@ static void PrintHelp() {
                  "  ps4_pkg_extract extract <file.pkg> --output <directory> --json-progress\n";
 }
 
-int main(int argc, char** argv) {
-    if (argc == 2 && std::string_view(argv[1]) == "--help") {
+static bool IsArgument(const fs::path& argument, std::string_view expected) {
+    // All control arguments are ASCII. User-supplied paths are never converted
+    // through this narrow representation on Windows.
+    return argument == fs::path(std::string(expected));
+}
+
+static int Run(const std::vector<fs::path>& arguments) {
+    const size_t argc = arguments.size();
+    if (argc == 2 && IsArgument(arguments[1], "--help")) {
         PrintHelp();
         return 0;
     }
-    if (argc >= 3 && std::string_view(argv[1]) == "inspect") {
+    if (argc >= 3 && IsArgument(arguments[1], "inspect")) {
         bool fast = false;
-        for (int i = 3; i < argc; ++i) {
-            fast = fast || std::string_view(argv[i]) == "--fast";
+        for (size_t i = 3; i < argc; ++i) {
+            fast = fast || IsArgument(arguments[i], "--fast");
         }
-        return CommandInspect(fs::path(argv[2]), fast);
+        return CommandInspect(arguments[2], fast);
     }
-    if (argc >= 5 && std::string_view(argv[1]) == "extract") {
+    if (argc >= 5 && IsArgument(arguments[1], "extract")) {
         fs::path output;
-        for (int i = 3; i + 1 < argc; ++i) {
-            if (std::string_view(argv[i]) == "--output") {
-                output = fs::path(argv[i + 1]);
+        for (size_t i = 3; i + 1 < argc; ++i) {
+            if (IsArgument(arguments[i], "--output")) {
+                output = arguments[i + 1];
                 break;
             }
         }
         if (!output.empty()) {
-            return CommandExtract(fs::path(argv[2]), output);
+            return CommandExtract(arguments[2], output);
         }
     }
     PrintHelp();
     return 1;
 }
+
+#ifdef _WIN32
+int wmain(int argc, wchar_t** argv) {
+    std::vector<fs::path> arguments;
+    arguments.reserve(static_cast<size_t>(argc));
+    for (int index = 0; index < argc; ++index) {
+        arguments.emplace_back(argv[index]);
+    }
+    return Run(arguments);
+}
+#else
+int main(int argc, char** argv) {
+    std::vector<fs::path> arguments;
+    arguments.reserve(static_cast<size_t>(argc));
+    for (int index = 0; index < argc; ++index) {
+        arguments.emplace_back(argv[index]);
+    }
+    return Run(arguments);
+}
+#endif

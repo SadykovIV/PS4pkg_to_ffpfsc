@@ -28,6 +28,22 @@ def test_sfo_round_trip_and_localized_title() -> None:
     assert choose_title(parsed, preferred_index=8) == "Игра"
 
 
+def test_choose_title_prefers_us_english_before_other_localized_titles() -> None:
+    parsed = parse_sfo_bytes(
+        make_sfo(
+            {
+                "TITLE_00": "日本語タイトル",
+                "TITLE_01": "English title",
+                "TITLE_08": "Русское название",
+                "TITLE_ID": "CUSA12345",
+            }
+        )
+    )
+
+    assert choose_title(parsed) == "English title"
+    assert choose_title(parsed, preferred_index=8) == "Русское название"
+
+
 @pytest.mark.parametrize(
     "data",
     [
@@ -48,6 +64,36 @@ def test_param_json_is_deterministic_unicode_utf8_without_bom() -> None:
     assert not first.startswith(b"\xef\xbb\xbf")
     parsed = validate_shadowmount_param_json(first, "CUSA12345")
     assert parsed["localizedParameters"]["en-US"]["titleName"] == "Путешествие ™"
+
+
+def test_param_json_uses_the_minimal_native_ps4_projection() -> None:
+    generated = build_param_json("CUSA12345", "Game")
+
+    assert json.loads(generated) == {
+        "localizedParameters": {
+            "defaultLanguage": "en-US",
+            "en-US": {"titleName": "Game"},
+        },
+        "titleId": "CUSA12345",
+        "titleName": "Game",
+    }
+
+
+def test_nonzero_sfo_user_parameters_are_mirrored_for_image_compatibility() -> None:
+    generated = build_param_json(
+        "CUSA13801",
+        "Sekiro™: Shadows Die Twice",
+        sfo_values={
+            "USER_DEFINED_PARAM_1": 2,
+            "USER_DEFINED_PARAM_2": 0,
+            "USER_DEFINED_PARAM_3": 545259552,
+        },
+    )
+
+    payload = json.loads(generated)
+    assert payload["userDefinedParam1"] == 2
+    assert payload["userDefinedParam3"] == 545259552
+    assert "userDefinedParam2" not in payload
 
 
 def test_param_json_title_mismatch_rejected() -> None:

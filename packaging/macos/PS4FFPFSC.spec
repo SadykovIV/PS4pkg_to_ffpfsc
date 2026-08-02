@@ -75,8 +75,8 @@ app = BUNDLE(
     info_plist={
         "CFBundleDisplayName": "PS4 FFPFSC",
         "CFBundleName": "PS4 FFPFSC",
-        "CFBundleShortVersionString": "0.2.6",
-        "CFBundleVersion": "7",
+        "CFBundleShortVersionString": "0.2.7",
+        "CFBundleVersion": "8",
         "LSMinimumSystemVersion": "13.0",
         "NSHighResolutionCapable": True,
         "NSRequiresAquaSystemAppearance": False,

@@ -17,6 +17,7 @@ from ps4ffpsc.gui_model import (
     package_version_text,
     parse_progress_event,
     scan_inventory_path,
+    scan_exit_is_usable,
     source_cli_arguments,
     temporary_cli_arguments,
 )
@@ -49,6 +50,15 @@ def test_folder_mode_is_recursive_cli_source(tmp_path: Path) -> None:
     ]
 
 
+def test_dump_mode_passes_selected_unpacked_game_tree(tmp_path: Path) -> None:
+    dumped = tmp_path / "CUSA12345"
+    dumped.mkdir()
+    assert source_cli_arguments("dump", [], dumped) == [
+        "--dump-dir",
+        str(dumped.resolve()),
+    ]
+
+
 def test_all_heavy_workspace_paths_use_selected_temp_directory(
     tmp_path: Path,
 ) -> None:
@@ -77,12 +87,24 @@ def test_scan_inventory_fallback_uses_selected_temp_directory(
     )
 
 
+def test_scan_exit_with_unselected_unsupported_pkg_is_still_usable() -> None:
+    assert scan_exit_is_usable(0)
+    assert scan_exit_is_usable(3)
+    assert not scan_exit_is_usable(1)
+
+
 def test_progress_events_parse_scan_stage_and_structured_worker_lines() -> None:
     assert parse_progress_event(
         "2026-07-26 INFO scanning 12 PKG file(s)"
     ) == {"kind": "scan_total", "total": 12}
     assert parse_progress_event(
         r"2026-07-26 INFO inspecting PKG: \\server\games\base.pkg"
+    ) == {"kind": "scan_item"}
+    assert parse_progress_event(
+        "2026-08-02 INFO scanning 1 unpacked game source(s)"
+    ) == {"kind": "scan_total", "total": 1}
+    assert parse_progress_event(
+        "2026-08-02 INFO inspecting unpacked game source: /games/CUSA12345"
     ) == {"kind": "scan_item"}
     assert parse_progress_event(
         "2026-07-26 INFO stage 3/5: creating compressed FFPFSC image"

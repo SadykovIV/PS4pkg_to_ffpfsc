@@ -11,6 +11,9 @@ GUI and command-line path do not have separate conversion implementations.
   `pkg/` directory is not mixed into this mode.
 - **Recursive folder** scans the selected directory and every descendant
   directory. Files with other extensions are ignored.
+- **Unpacked game** accepts either a flat root containing `eboot.bin` and
+  `sce_sys/param.sfo`, or a dumper-style root with `app/` and an optional
+  `patch/`. The source remains read-only; merge never consumes its files.
 
 Switching modes clears the previous inventory. The source PKGs remain in place
 and are opened read-only by the extractor.
@@ -26,7 +29,7 @@ immediately. It does not perform a full source-file hash pass.
 
 ## Workflow
 
-1. Select PKG files or a source folder.
+1. Select PKG files, a recursive PKG folder, or an unpacked game tree.
 2. Select the output folder.
 3. Keep the system temporary directory (`%TEMP%` on Windows or `/tmp` on
    macOS), or choose a different directory/volume. The GUI shows its currently
@@ -39,6 +42,13 @@ immediately. It does not perform a full source-file hash pass.
    packages are checked by default. Exact copies identified by the PKG's
    embedded package digest are shown as duplicates and unchecked by default;
    split `part1`/`part2` packages with different digests remain checked.
+   Unsupported entries are listed separately and do not block a checked
+   supported game. An explicit `backport`, `back-port`, or `Fix5.05` entry is
+   shown as a backport layer and ordered after the ordinary update with the
+   same APP_VER. In unpacked-game mode, the top-level game row selects the
+   complete source container; its TREE/PATCH TREE/DLC child rows are
+   informational because those components cannot be independently omitted
+   without changing the selected source layout.
 6. Choose the output format, then build. Compressed `FFPFSC` is the default;
    uncompressed raw `exFAT` is also available. Raw exFAT is written directly to
    the final artifact, and selective verification reads the filesystem
@@ -91,6 +101,8 @@ are removed after the merged tree is verified. A successful build removes its
 entire per-game temporary workspace; a failed or cancelled build keeps the
 verified state required for resume. Neither cleanup path changes source PKGs or
 completed output artifacts.
+For an unpacked source the same hardlink/copy policy is used with source
+consumption disabled, and cleanup remains confined to the temporary workspace.
 
 The PKG helper keeps one read handle open for the complete extraction and uses
 a bounded 8 MiB read-ahead cache instead of thousands of tiny 64 KiB
@@ -108,7 +120,7 @@ corrupting its final bytes.
 ## Launch and packaging
 
 Download and completely extract
-`PS4-FFPFSC-v0.2.6-windows-x64.zip`, then launch `PS4 FFPFSC.exe`. The
+`PS4-FFPFSC-v0.2.7-windows-x64.zip`, then launch `PS4 FFPFSC.exe`. The
 accompanying `_internal` directory and `ps4ffpsc-worker.exe` are required parts
 of the self-contained application.
 

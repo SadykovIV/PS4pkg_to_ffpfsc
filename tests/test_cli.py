@@ -63,6 +63,33 @@ def test_build_parser_accepts_output_format_and_bounded_workers(
         )
 
 
+def test_cli_accepts_unpacked_game_source_and_rejects_mixed_inputs(
+    tmp_path: Path,
+) -> None:
+    dumped = tmp_path / "CUSA12345"
+    dumped.mkdir()
+    package = tmp_path / "base.pkg"
+    package.write_bytes(b"pkg")
+    parser = cli.build_parser()
+
+    args = parser.parse_args(["scan", "--dump-dir", str(dumped)])
+    settings = Settings.load(tmp_path, args, tmp_path)
+    assert settings.dump_dirs == (dumped.resolve(),)
+    assert settings.pkg_files == ()
+
+    mixed = parser.parse_args(
+        [
+            "scan",
+            "--dump-dir",
+            str(dumped),
+            "--pkg-file",
+            str(package),
+        ]
+    )
+    with pytest.raises(ValueError, match="cannot be combined"):
+        Settings.load(tmp_path, mixed, tmp_path)
+
+
 def test_build_reuses_inventory_from_initial_scan(
     monkeypatch,
     tmp_path: Path,
@@ -111,3 +138,107 @@ def test_build_reuses_inventory_from_initial_scan(
     assert scan_calls == [True]
     assert received == [inventory]
     assert '"status": "completed"' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("command", ["unpack", "merge"])
+def test_cli_stage_commands_rescan_explicit_sources(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    command: str,
+) -> None:
+    source = tmp_path / "selected.pkg"
+    source.write_bytes(b"source")
+    settings = Settings(
+        root=tmp_path,
+        pkg_dir=tmp_path / "pkg",
+        unpacked_dir=tmp_path / "unpacked",
+        output_dir=tmp_path / "output",
+        work_dir=tmp_path / "work",
+        temp_dir=tmp_path / "tmp",
+        pkg_files=(source,),
+        json_output=True,
+    )
+    game = {
+        "title_id": "CUSA12345",
+        "title": "Test",
+        "buildable": True,
+        "conflicts": [],
+        "warnings": [],
+    }
+    inventory = {
+        "games": {"CUSA12345": game},
+        "packages": [],
+        "unsupported": [],
+    }
+    scan_calls: list[bool] = []
+
+    monkeypatch.setattr(cli, "_settings", lambda _args: settings)
+    monkeypatch.setattr(cli, "configure_logging", lambda _settings: None)
+
+    def load(_settings: Settings, refresh: bool = False) -> dict:
+        scan_calls.append(refresh)
+        return inventory
+
+    monkeypatch.setattr(cli, "load_or_scan", load)
+    if command == "unpack":
+        monkeypatch.setattr(
+            cli,
+            "unpack_game",
+            lambda _settings, scanned, title_id: {
+                "title_id": title_id,
+                "scanned": scanned is inventory,
+            },
+        )
+    else:
+        monkeypatch.setattr(
+            cli,
+            "merge_game",
+            lambda _settings, scanned, title_id: {
+                "title_id": title_id,
+                "scanned": scanned is inventory,
+            },
+        )
+
+    assert (
+        cli.main([command, "CUSA12345", "--pkg-file", str(source), "--json"])
+        == 0
+    )
+    assert scan_calls == [True]
+
+
+def test_cli_list_uses_effective_same_version_patch_order(capsys) -> None:
+    ordinary = {
+        "path": "/tmp/z-ordinary.pkg",
+        "supported": True,
+        "kind": "patch",
+        "app_version": "01.10",
+        "source_id": "stat-ordinary",
+        "patch_role": "ordinary",
+    }
+    additional = {
+        "path": "/tmp/a-Fix5.05.pkg",
+        "supported": True,
+        "kind": "patch",
+        "app_version": "01.10",
+        "source_id": "stat-additional",
+        "patch_role": "additional_layer",
+    }
+    inventory = {
+        "games": {
+            "CUSA12345": {
+                "title": "Test",
+                "buildable": True,
+                "base": [{}],
+                "patches": [additional, ordinary],
+                "dlc": [],
+                "conflicts": [],
+                "warnings": [],
+            }
+        },
+        "unsupported": [],
+    }
+
+    cli._print_list(inventory, json_output=False)
+
+    output = capsys.readouterr().out
+    assert output.index("z-ordinary.pkg") < output.index("a-Fix5.05.pkg")

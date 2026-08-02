@@ -17,8 +17,9 @@ path traversal, symlinks, duplicates, conflicting bases, orphan patches,
 overlay reports, deterministic JSON, sparse files above 4 GiB, stat-based resume,
 and a real MkPFS nested-exFAT integration.
 
-Latest local result on Apple Silicon: CMake/CTest passed; pytest `62 passed`;
-GUI smoke passed. Regression tests explicitly fail if normal scan, unpack,
+The release gate on Apple Silicon requires CMake/CTest, the complete pytest
+suite, and the frozen GUI smoke test to pass. Regression tests explicitly fail
+if normal scan, unpack,
 resume, or build code attempts to call the full-file SHA-256 helper. A prior
 Journey artifact passed outer MkPFS verification with zero errors and exact
 deep-unpack SHA comparison. `host_tests_passed=true`,
