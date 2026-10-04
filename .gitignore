@@ -21,3 +21,5 @@ build-release/
 build-release-windows/
 third_party/ps4_dlc_patch/bin/
 third_party/ps4_dlc_patch/obj/
+AppDir/
+build-tools/

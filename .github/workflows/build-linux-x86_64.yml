@@ -1,0 +1,98 @@
+name: build-linux-x86_64
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+  CMAKE_BUILD_PARALLEL_LEVEL: "2"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.13.14"
+          cache: pip
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            pkg-config \
+            libcrypto++-dev \
+            zlib1g-dev \
+            libegl1 \
+            libgl1 \
+            libxkbcommon0
+
+      - name: Install Python build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.lock
+
+      - name: Run Python tests
+        run: pytest -q
+
+      - name: Build Linux AppImage
+        env:
+          APP_VERSION: ${{ github.event_name == 'release' && github.event.release.tag_name || '' }}
+        run: ./scripts/build_linux_appimage.sh
+
+      - name: Upload Linux AppImage artifact
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: PS4-FFPFSC-linux-x86_64
+          path: |
+            release/*.AppImage
+            release/*.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  release:
+    if: github.event_name == 'release' && github.event.action == 'published'
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download Linux release artifact
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: PS4-FFPFSC-linux-x86_64
+          path: release
+
+      - name: Upload Linux AppImage to GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload \
+            "${{ github.event.release.tag_name }}" \
+            release/*.AppImage \
+            release/*.sha256 \
+            --clobber

@@ -2007,8 +2007,21 @@ class MainWindow(QMainWindow):
         self.log_edit.clear()
 
     def _reveal_output(self) -> None:
+        import shutil
+        import subprocess
+
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.output_dir.resolve())))
+        path = str(self.output_dir.resolve())
+
+        if shutil.which("xdg-open"):
+            subprocess.Popen(["xdg-open", path])
+            return
+
+        if shutil.which("gio"):
+            subprocess.Popen(["gio", "open", path])
+            return
+
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
     def _show_error(self, title: str, detail: str) -> None:
         QMessageBox.critical(self, title, detail)

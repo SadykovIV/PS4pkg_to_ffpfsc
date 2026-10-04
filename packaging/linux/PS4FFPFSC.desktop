@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=PS4 FFPFSC
+Comment=PS4 PKG to FFPFSC converter
+Exec=AppRun
+Icon=ps4ffpsc
+Terminal=false
+Type=Application
+Categories=Utility;
+StartupNotify=true
