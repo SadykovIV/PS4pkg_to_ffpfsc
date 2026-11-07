@@ -30,3 +30,8 @@ When a selected unpacked game's `npbind.dat` SHA-1 footer is repaired
 automatically, the change affects only the temporary merged copy and does not
 turn static verification into a runtime guarantee. The selected unpacked tree
 remains unchanged.
+
+Staged SELF/ELF files, including nested modules, receive execute bits for users
+who already have read permission. Input files remain unchanged, and repairs are
+listed in `executable_mode_repairs`. Preserve these modes when transferring a
+Folder source to PS5.

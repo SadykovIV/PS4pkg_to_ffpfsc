@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import stat
 import struct
 from pathlib import Path
 
@@ -82,7 +83,13 @@ def test_synthetic_base_patch_overlay_and_param_json(tmp_path: Path) -> None:
     patch_dir = package_destination(root, patch)
     (base_dir / "sce_sys").mkdir(parents=True)
     (patch_dir / "sce_sys").mkdir(parents=True)
-    (base_dir / "eboot.bin").write_bytes(b"base executable")
+    source_eboot = base_dir / "eboot.bin"
+    source_eboot.write_bytes(b"\x4f\x15\x3d\x1dbase executable")
+    source_eboot.chmod(0o644)
+    plugin = base_dir / "Media" / "Plugins" / "SaveData.prx"
+    plugin.parent.mkdir(parents=True)
+    plugin.write_bytes(b"\x4f\x15\x3d\x1dnested module")
+    plugin.chmod(0o644)
     (base_dir / "data.bin").write_bytes(b"old")
     base_param_sfo = make_sfo(
         {
@@ -114,6 +121,14 @@ def test_synthetic_base_patch_overlay_and_param_json(tmp_path: Path) -> None:
     (patch_dir / "sce_sys" / "param.sfo").write_bytes(patch_param_sfo)
     report = merge_game(settings, inventory, "CUSA12345")
     merged = root / "merged" / "app"
+    for source in (source_eboot, plugin):
+        target = merged / source.relative_to(base_dir)
+        assert stat.S_IMODE(source.stat().st_mode) == 0o644
+        assert stat.S_IMODE(target.stat().st_mode) == 0o755
+        assert target.read_bytes() == source.read_bytes()
+    assert {entry["path"] for entry in report["executable_mode_repairs"]} == {
+        "eboot.bin", "Media/Plugins/SaveData.prx"
+    }
     assert (merged / "data.bin").read_bytes() == b"new"
     merged_param_sfo = merged / "sce_sys" / "param.sfo"
     assert merged_param_sfo.read_bytes() == patch_param_sfo

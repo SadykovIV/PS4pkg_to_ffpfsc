@@ -20,6 +20,7 @@ from .dlc_embed import (
     DLC_MODES,
     embed_experimental_dlc,
 )
+from .executable_modes import normalize_executable_modes
 from .inventory import (
     find_extractor,
     inspect_package,
@@ -1164,6 +1165,10 @@ def merge_game(
             atomic_write_json(target / "ps4ffpsc-dlc.json", metadata)
             dlc_reports.append(metadata)
 
+    executable_mode_repairs = normalize_executable_modes(partial)
+    if executable_mode_repairs:
+        LOG.info("restored executable permissions on %d staged SELF/ELF files",
+                 len(executable_mode_repairs))
     os.replace(partial, app)
     if dlc:
         os.replace(addcont_partial, addcont)
@@ -1201,6 +1206,7 @@ def merge_game(
         },
         "param_sfo_preserved": True,
         "npbind_footer_repair": npbind_footer_repair,
+        "executable_mode_repairs": executable_mode_repairs,
         "unpacked_source_preserved": True,
         "static_shadowmount_compatible": compat == "current-smp",
         "static_shadowmount_checks_passed": compat == "current-smp",
@@ -2139,6 +2145,13 @@ def build_game(
                 "runtime_verified": False,
                 "entries": [],
             }
+    mode_repairs = normalize_executable_modes(app)
+    if mode_repairs:
+        merge_report.setdefault("executable_mode_repairs", []).extend(mode_repairs)
+        merge_report["merged_tree_signature"] = tree_stat_signature(app)
+        atomic_write_json(root / "reports" / "merge_report.json", merge_report)
+        LOG.info("restored executable permissions on %d resumed/embedded SELF/ELF files",
+                 len(mode_repairs))
     if partial.exists():
         partial.unlink()
     mkpfs = mkpfs_command(settings)
